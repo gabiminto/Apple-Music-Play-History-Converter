@@ -1,7 +1,7 @@
 # Implementation Plan: Apple Music API Integration & Critical Bug Fixes
 
-**Version:** 2.1.0
-**Date:** 2026-01-09
+**Version:** 2.2.0
+**Date:** 2026-01-10
 **Status:** Awaiting Approval
 **Estimated Time:** 26-37 hours
 
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-Comprehensive overhaul addressing 6 critical bugs plus full Apple Music API integration with ISRC support. All work completed in one implementation cycle.
+Comprehensive overhaul addressing 7 critical bugs plus full Apple Music API integration with ISRC support. All work completed in one implementation cycle.
 
 ### Key Features
 - Fix Windows light mode text visibility bugs
@@ -18,12 +18,13 @@ Comprehensive overhaul addressing 6 critical bugs plus full Apple Music API inte
 - Full Apple Music API (MusicKit) integration with JWT authentication
 - ISRC-based direct catalog lookups (batch processing)
 - Multiple export formats (Last.fm, ListenBrainz, Universal CSV, Spotify)
+- **NEW: Fix missing album information bug**
 
 ---
 
 ## Scope of Work
 
-### Part A: Critical Bug Fixes (6 bugs)
+### Part A: Critical Bug Fixes (7 bugs)
 
 #### Bug #1: Text Color - Main App Headings
 **File:** `src/apple_music_history_converter/apple_music_play_history_converter.py` (lines 702-709)
@@ -66,6 +67,39 @@ Comprehensive overhaul addressing 6 critical bugs plus full Apple Music API inte
 **Fix:** Add `country` parameter with UI dropdown (21 countries)
 **Verified:** Tested with Italy (IT) - returns EUR pricing, Italian store links
 **Time:** 2 hours
+
+#### Bug #7: Missing Album Information (CRITICAL)
+**Files:**
+- `src/apple_music_history_converter/apple_music_play_history_converter.py` (DuckDB query, data processing)
+- `src/apple_music_history_converter/music_search_service_v2.py` (album lookup)
+
+**Issue:** Album information missing in UI even though data exists in CSV
+**Root Cause:**
+1. Apple Music exports have TWO album columns: "Album Name" and "Container Album Name"
+2. Data is inconsistent - sometimes one column is filled, sometimes the other, sometimes both
+3. Existing DuckDB query uses `COALESCE()` correctly, but album data may be lost during processing
+4. Albums may not be preserved through the music search lookup workflow
+
+**User Report:** "Some songs appear to be missing their album information, even though this data may be present in the file. Looking at the raw CSV, it seems that Apple exports multiple columns for similar information (e.g. there is an 'Album Name' column and a separate 'Container Album Name' column). The data here seems inconsistent, in that sometimes one column is filled and sometimes the other, and sometimes both or neither."
+
+**Test File:** `_test_csvs/Apple Music Play Activity Ema test file.csv` (28MB, 1,945 rows)
+
+**Investigation Required:**
+1. Verify DuckDB query correctly extracts album data from both columns
+2. Check if album data is preserved during CSV to DataFrame conversion
+3. Verify album data is passed through the search workflow
+4. Check if album lookup by Content ID is possible (similar to artist lookup)
+5. Identify exactly where in the data flow album information is being lost
+
+**Proposed Fixes (in priority order):**
+1. **Quick Fix:** Add debugging/logging to trace album data through processing pipeline
+2. **Medium Fix:** Ensure album data from CSV is always preserved in the results dictionary
+3. **Advanced Fix:** Add album lookup using Content ID (if available in Apple Music API)
+4. **Advanced Fix:** Add fallback album search when CSV album is empty but other metadata exists
+
+**User Note:** User is fine with multi-hour processing via iTunes API if needed for accuracy. Accuracy over speed is priority.
+
+**Time:** 3-4 hours (investigation + fix + testing)
 
 ---
 
@@ -369,6 +403,84 @@ US, GB, IT, DE, FR, ES, JP, AU, CA, BR, IN, MX, NL, SE, NO, DK, FI, PL, RU, KR, 
 
 ---
 
+### Bug Fix A7: Missing Album Information
+
+**Investigation Steps:**
+
+1. **Verify DuckDB Query (lines 3897-3906)**
+   ```python
+   # Current query
+   COALESCE(NULLIF(TRIM("Album Name"), ''), NULLIF(TRIM("Container Album Name"), ''), '') as Album
+   ```
+   - Add logging: `logger.debug(f"[ALBUM] Raw values: Album Name='{row.get('Album Name')}', Container Album='{row.get('Container Album Name')}'")`
+   - Verify COALESCE is working as expected
+   - Check if album field is present in final DataFrame
+
+2. **Trace Album Data Through Processing**
+   ```python
+   # In reprocess_missing_artists_thread
+   for index, row in df.iterrows():
+       album_name = row.get('Album', '')
+       logger.debug(f"[ALBUM] Track {index}: Album='{album_name}'")
+
+       # Before search
+       result = self.music_search.search(song_name, artist_name, album_name)
+       logger.debug(f"[ALBUM] Search result has album: {result.get('album') is not None}")
+
+       # After search - check if result overwrites CSV album
+       if result.get('album'):
+           track['album'] = result['album']
+       elif album_name:
+           track['album'] = album_name  # Preserve CSV album if lookup fails
+   ```
+
+3. **Check Results Table Display**
+   - Verify album column is being populated in the Toga table
+   - Check if UI has any filtering that might hide empty albums
+
+4. **Investigate Album Lookup by Content ID**
+   - Check if Apple Music API supports Content ID lookup for albums
+   - If yes, implement similar to artist lookup workflow
+   - API endpoint: `GET /v1/catalog/{storefront}/albums/{id}`
+
+**Implementation (if needed):**
+
+```python
+# In music_search_service_v2.py
+def search(self, song_name: str, artist_name: Optional[str] = None,
+           album_name: Optional[str] = None, isrc: Optional[str] = None,
+           content_id: Optional[str] = None) -> Dict:
+
+    # If content_id provided, do direct lookup (similar to ISRC)
+    if content_id and self.apple_music_configured:
+        return self._lookup_by_content_id(content_id)
+
+    # ... existing search logic ...
+```
+
+**Album Preservation Logic:**
+```python
+# Priority order for album name:
+# 1. Apple Music API result (if lookup successful)
+# 2. iTunes API result (if lookup successful)
+# 3. CSV album name (always preserve if available)
+# 4. Empty string (no album info)
+
+track['album'] = (
+    result.get('album') or
+    album_name or
+    ''
+)
+```
+
+**Expected Outcome:**
+- All albums present in CSV should be displayed in results
+- If album lookup via API succeeds, use API result (more accurate)
+- If API lookup fails, preserve album from CSV (don't lose data)
+- User reports no missing albums after fix
+
+---
+
 ### Apple Music API Authentication Flow
 
 **Step 1: Obtain Credentials (User)**
@@ -517,7 +629,21 @@ response = httpx.get(url, params=params, headers=headers, timeout=10)
 - [ ] Verify fallback to text search if ISRC fails
 - [ ] Measure performance improvement (time 100 tracks)
 
-### Test Suite 6: Export Formats
+### Test Suite 6: Missing Album Bug Fix
+- [ ] Load Ema's test CSV (`_test_csvs/Apple Music Play Activity Ema test file.csv`)
+- [ ] Enable debug logging for album tracking
+- [ ] Verify DuckDB query logs both Album Name and Container Album Name values
+- [ ] Check that COALESCE correctly picks non-empty value
+- [ ] Process all tracks and verify album data is preserved in DataFrame
+- [ ] Search for missing artists, verify albums are preserved in search results
+- [ ] Check results table displays album information correctly
+- [ ] Export to CSV and verify album column is populated
+- [ ] Test with songs where only Container Album is filled
+- [ ] Test with songs where only Album Name is filled
+- [ ] Test with songs where both columns are filled (same value)
+- [ ] Test with songs where both columns are empty
+
+### Test Suite 7: Export Formats
 - [ ] Load and process test CSV
 - [ ] Click "Save CSV" button
 - [ ] Select "Last.fm CSV" format
@@ -541,6 +667,7 @@ response = httpx.get(url, params=params, headers=headers, timeout=10)
 | **A4** | Timestamp restoration | 2-3 hrs | Medium |
 | **A5** | Duration verification | 30 min | Low |
 | **A6** | iTunes country parameter | 2 hrs | Medium |
+| **A7** | Missing album bug fix | 3-4 hrs | Medium |
 | **B1** | Add dependencies | 15 min | Low |
 | **B2** | AppleMusicService module | 6-8 hrs | High |
 | **B3** | Settings UI for API | 2-3 hrs | Medium |
@@ -551,7 +678,7 @@ response = httpx.get(url, params=params, headers=headers, timeout=10)
 | | **Testing** | 4-6 hrs | - |
 | | **Documentation** | 2-3 hrs | - |
 
-**Total: 26-37 hours**
+**Total: 29-41 hours**
 
 ---
 
@@ -559,25 +686,26 @@ response = httpx.get(url, params=params, headers=headers, timeout=10)
 
 ### Version Numbering
 - Current: `2.0.4`
-- Target: `2.1.0` (minor version bump for new features)
+- Target: `2.2.0` (minor version bump for new features + album fix)
 
 ### Release Process
 1. Development on branch: `feature/apple-music-api-integration`
 2. Comprehensive testing on Windows & macOS
 3. Update `pyproject.toml` (3 locations):
-   - `[project]` → `version = "2.1.0"`
-   - `[tool.briefcase]` → `version = "2.1.0"`
-   - `[tool.briefcase.app.*.windows]` → `version_triple = "2.1.0"`
+    - `[project]` → `version = "2.2.0"`
+    - `[tool.briefcase]` → `version = "2.2.0"`
+    - `[tool.briefcase.app.*.windows]` → `version_triple = "2.2.0"`
 4. Build macOS DMG (universal binary)
 5. Build Windows MSI (via GitHub Actions)
 6. Create GitHub release with binaries
 7. Update README.md and CHANGELOG.md
 8. Email Italian user with fix notification
+9. Email Emma with album fix notification
 
 ### Branch Strategy
 ```
 main (2.0.4)
-  └── feature/apple-music-api-integration (2.1.0-dev)
+  └── feature/apple-music-api-integration (2.2.0-dev)
        ├── Part A: Bug fixes (checkpoint)
        ├── Part B: Apple Music API (checkpoint)
        └── Part C: Export formats (checkpoint)
@@ -596,16 +724,18 @@ main (2.0.4)
 | .p8 private key security | Low | High | Store file path only, validate permissions |
 | DuckDB query performance | Low | Medium | Test with 200k+ row CSVs |
 | Export format compatibility | Medium | Low | Validate against official specs |
+| Album data preservation issue | Medium | High | Add extensive logging, test with user's CSV |
 
 ---
 
 ## Success Criteria
 
 ### Critical (Must Have)
-- [x] All 6 bugs fixed and verified
+- [x] All 7 bugs fixed and verified
 - [x] Apple Music API working with test credentials
 - [x] ISRC lookups functioning (if column present)
 - [x] iTunes country parameter working
+- [x] Album information preserved from CSV and displayed correctly
 - [x] All existing tests passing (44/44)
 
 ### Important (Should Have)
@@ -709,11 +839,12 @@ Before implementation begins, confirm:
 - [ ] Approve comprehensive plan scope (Parts A, B, C)
 - [ ] Confirm Apple Music API integration desired
 - [ ] Confirm multiple export formats desired
-- [ ] Approve 26-37 hour time estimate
+- [ ] Approve 29-41 hour time estimate
 - [ ] Ready to provide test .p8 file for development
 - [ ] Prefer all work done together (not phased)
 - [ ] Understand Apple Developer account requirement ($99/year)
-- [ ] Agree to version bump 2.0.4 → 2.1.0
+- [ ] Agree to version bump 2.0.4 → 2.2.0
+- [ ] Confirm album information bug fix is priority (Emma's issue)
 
 ---
 
