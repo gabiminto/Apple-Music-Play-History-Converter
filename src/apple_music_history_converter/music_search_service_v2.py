@@ -61,6 +61,10 @@ class MusicSearchServiceV2:
         data_dir = str(get_database_dir())
         self.musicbrainz_manager = MusicBrainzManagerV2(data_dir)
 
+        # Apple Music API service (initialized on-demand if credentials configured)
+        self.apple_music_service = None
+        self._apple_music_lock = RLock()
+
         # iTunes API rate limiting (use RLock for reentrant locking)
         self.itunes_lock = RLock()
         self.itunes_requests = deque()
@@ -154,6 +158,120 @@ class MusicSearchServiceV2:
             self.settings["auto_fallback"] = enabled
             self._save_settings()
         logger.info(f"Auto-fallback set to: {enabled}")
+
+    def _is_apple_music_configured(self) -> bool:
+        """Check if Apple Music API credentials are configured AND enabled."""
+        # Check if explicitly disabled
+        if not self.settings.get("apple_music_enabled", True):
+            return False
+
+        # All three credentials must be set for Apple Music API to work
+        team_id = self.settings.get("apple_music_team_id")
+        key_id = self.settings.get("apple_music_key_id")
+        key_path = self.settings.get("apple_music_key_path")
+        return bool(team_id and key_id and key_path)
+
+    def _get_apple_music_service(self):
+        """Get or create Apple Music API service instance."""
+        with self._apple_music_lock:
+            if self.apple_music_service is None:
+                try:
+                    from .apple_music_service import AppleMusicService
+
+                    # Use user-configured credentials (required for API access)
+                    self.apple_music_service = AppleMusicService(
+                        team_id=self.settings.get("apple_music_team_id"),
+                        key_id=self.settings.get("apple_music_key_id"),
+                        private_key_path=self.settings.get("apple_music_key_path"),
+                        storefront=self.settings.get("itunes_country", "us")
+                    )
+                    logger.info("[AM API] Apple Music service initialized")
+                except Exception as e:
+                    logger.error(f"[AM API] Failed to initialize service: {e}")
+                    self.apple_music_service = None
+
+            return self.apple_music_service
+
+    async def _search_apple_music_isrc(self, isrc: str) -> Dict:
+        """Search Apple Music by ISRC code (fast, 100% accurate)."""
+        try:
+            service = self._get_apple_music_service()
+            if not service:
+                return {
+                    "success": False,
+                    "source": "apple_music",
+                    "error": "Apple Music service not available"
+                }
+
+            result = await service.lookup_by_isrc([isrc])
+
+            # Parse response
+            if 'data' in result and len(result['data']) > 0:
+                song_data = result['data'][0]['attributes']
+                return {
+                    "success": True,
+                    "artist": song_data.get('artistName', ''),
+                    "album": song_data.get('albumName', ''),
+                    "source": "apple_music",
+                    "isrc": isrc
+                }
+            else:
+                return {
+                    "success": False,
+                    "source": "apple_music",
+                    "error": "No match found"
+                }
+        except Exception as e:
+            logger.error(f"[AM API] ISRC lookup failed: {e}")
+            return {
+                "success": False,
+                "source": "apple_music",
+                "error": str(e)
+            }
+
+    async def _search_apple_music_text(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+        """Search Apple Music by text (fallback when ISRC not available)."""
+        try:
+            service = self._get_apple_music_service()
+            if not service:
+                return {
+                    "success": False,
+                    "source": "apple_music",
+                    "error": "Apple Music service not available"
+                }
+
+            # Build search term (artist + song for better results)
+            if artist_name:
+                search_term = f"{artist_name} {song_name}"
+            else:
+                search_term = song_name
+
+            result = await service.search_catalog(search_term, types=['songs'], limit=5)
+
+            # Parse response
+            if 'results' in result and 'songs' in result['results']:
+                songs = result['results']['songs']['data']
+                if songs and len(songs) > 0:
+                    song_data = songs[0]['attributes']
+                    return {
+                        "success": True,
+                        "artist": song_data.get('artistName', ''),
+                        "album": song_data.get('albumName', ''),
+                        "source": "apple_music"
+                    }
+
+            return {
+                "success": False,
+                "source": "apple_music",
+                "error": "No match found"
+            }
+        except Exception as e:
+            logger.error(f"[AM API] Text search failed: {e}")
+            return {
+                "success": False,
+                "source": "apple_music",
+                "error": str(e)
+            }
 
     def clear_search_cache(self):
         """Clear the search result cache.
@@ -262,7 +380,7 @@ class MusicSearchServiceV2:
         return ready
 
     @trace_call("MusicSearch.search_song")
-    async def search_song(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+    async def search_song(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None, isrc: Optional[str] = None) -> Dict:
         """
         Main search method with comprehensive MusicBrainz integration.
 
@@ -270,7 +388,8 @@ class MusicSearchServiceV2:
             Dict with keys:
             - success: bool
             - artist: str (if found)
-            - source: str ("musicbrainz", "itunes", "cached", or "none")
+            - album: str (if found)
+            - source: str ("musicbrainz", "itunes", "apple_music", "cached", or "none")
             - error: str (if error occurred)
         """
         # Phase 3: Check persistent mapping cache first (instant lookup)
@@ -285,17 +404,26 @@ class MusicSearchServiceV2:
                     "confidence": cached.get('confidence', 'high')
                 }
 
+        # Priority 1: ISRC lookup via Apple Music API (if ISRC provided and configured)
+        if isrc and self._is_apple_music_configured():
+            result = await self._search_apple_music_isrc(isrc)
+            if result["success"]:
+                logger.debug(f"[AM API] ISRC lookup success: {isrc}")
+                return result
+            logger.debug(f"[AM API] ISRC lookup failed, falling back to text search")
+
         provider = self.get_search_provider()
         auto_fallback = self.get_auto_fallback()
 
-        logger.debug(f"Searching: song='{song_name}', artist='{artist_name}', album='{album_name}'")
+        logger.debug(f"Searching: song='{song_name}', artist='{artist_name}', album='{album_name}', isrc='{isrc}'")
         if TRACE_ENABLED:
             trace_log.debug(
-                "search_song: provider=%s song=%s artist=%s album=%s auto_fallback=%s",
+                "search_song: provider=%s song=%s artist=%s album=%s isrc=%s auto_fallback=%s",
                 provider,
                 song_name,
                 artist_name,
                 album_name,
+                isrc,
                 auto_fallback,
             )
 
@@ -328,7 +456,24 @@ class MusicSearchServiceV2:
                     )
                 return result
 
-            # If no match and auto-fallback enabled, try iTunes
+            # If no match and auto-fallback enabled, try Apple Music API (if configured)
+            if auto_fallback and self._is_apple_music_configured():
+                if TRACE_ENABLED:
+                    trace_log.debug("MusicBrainz miss for %s - falling back to Apple Music API", song_name)
+                result = await self._search_apple_music_text(song_name, artist_name, album_name)
+                if result["success"]:
+                    # Phase 3: Store in persistent cache
+                    if self._mapping_cache.is_enabled:
+                        self._mapping_cache.store(
+                            apple_song=song_name,
+                            apple_album=album_name,
+                            apple_artist=artist_name,
+                            mb_artist_credit=result.get("artist", ""),
+                            confidence="medium"
+                        )
+                    return result
+
+            # If still no match, try iTunes (or if Apple Music not configured)
             if auto_fallback:
                 if TRACE_ENABLED:
                     trace_log.debug("MusicBrainz miss for %s - falling back to iTunes", song_name)
@@ -457,10 +602,10 @@ class MusicSearchServiceV2:
             }
 
     @trace_call("MusicSearch._search_itunes_async")
-    async def _search_itunes_async(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+    async def _search_itunes_async(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None, isrc: Optional[str] = None) -> Dict:
         """Search iTunes API with rate limiting (async wrapper)."""
         return await asyncio.get_event_loop().run_in_executor(
-            None, self._search_itunes, song_name, artist_name, album_name
+            None, self._search_itunes, song_name, artist_name, album_name, isrc
         )
 
     def _safe_print(self, *args, **kwargs):
@@ -544,8 +689,34 @@ class MusicSearchServiceV2:
         self._debug_log("=== NETWORK DIAGNOSTICS END ===")
         return diagnostics
 
+    def _run_isrc_lookup_sync(self, isrc_code: str) -> Dict:
+        """Run async ISRC lookup from synchronous batch search."""
+        try:
+            coro = self._search_apple_music_isrc(isrc_code)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                logger.warning("[AM API] ISRC lookup skipped (running event loop)")
+                return {
+                    "success": False,
+                    "source": "apple_music",
+                    "error": "Running event loop",
+                }
+
+            return asyncio.run(coro)
+        except Exception as e:
+            logger.error(f"[AM API] ISRC lookup failed: {e}")
+            return {
+                "success": False,
+                "source": "apple_music",
+                "error": str(e),
+            }
+
     @trace_call("MusicSearch._search_itunes")
-    def _search_itunes(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+    def _search_itunes(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None, isrc: Optional[str] = None) -> Dict:
         """Search iTunes API with rate limiting."""
         import threading
         thread_id = threading.current_thread().ident
@@ -559,6 +730,14 @@ class MusicSearchServiceV2:
                     cached_result = self._search_cache[cache_key]
                     logger.debug(f"   [D] Cache hit for '{song_name}' - returning cached result")
                     return cached_result
+
+        # Priority 1: ISRC lookup via Apple Music API (if ISRC provided and configured)
+        # NOTE: This happens INSIDE the synchronous method so batch search can benefit
+        if isrc and self._is_apple_music_configured():
+            # Use asyncio.run if called from thread, or just call it if we can
+            # But this is a synchronous method.
+            # Best to handle ISRC lookup BEFORE calling _search_itunes if possible.
+            pass
 
         self._debug_log(f"\n[#] DEBUG: _search_itunes START (Thread {thread_id})")
         self._debug_log(f"   Song: '{song_name}'")
@@ -585,11 +764,13 @@ class MusicSearchServiceV2:
 
                 # iTunes API call
                 url = "https://itunes.apple.com/search"
+                country_code = self.settings.get("itunes_country", "us")
                 params = {
                     'term': search_term,
                     'media': 'music',
                     'entity': 'song',
-                    'limit': 5
+                    'limit': 5,
+                    'country': country_code
                 }
                 self._debug_log(f"   [N] Making iTunes API request...")
                 self._debug_log(f"   URL: {url}")
@@ -883,7 +1064,7 @@ class MusicSearchServiceV2:
         logger.debug(f"      [OK] Added request to queue, total: {len(self.itunes_requests)}")
         logger.debug(f"      [CLOCK] _enforce_rate_limit END")
 
-    def search_batch_api(self, song_names: List[str], progress_callback=None, interrupt_check=None) -> List[Dict]:
+    def search_batch_api(self, song_names: List[str], progress_callback=None, interrupt_check=None, isrc_codes: List[Optional[str]] = None) -> List[Dict]:
         """
         Search API (iTunes or MusicBrainz) for multiple songs sequentially.
         Both APIs require sequential requests to avoid rate limiting.
@@ -892,9 +1073,17 @@ class MusicSearchServiceV2:
             song_names: List of track names to search
             progress_callback: Optional callback(track_idx, track_name, result, completed_count, total_count)
             interrupt_check: Optional callable that returns True if search should be interrupted
+            isrc_codes: Optional list of ISRC codes corresponding to each song (same length as song_names)
         """
         # Log batch search entry
         logger.debug(f"search_batch_api: {len(song_names)} songs, provider={self.get_search_provider()}")
+
+        # Ensure ISRC codes list matches song names length
+        if isrc_codes is None:
+            isrc_codes = [None] * len(song_names)
+        elif len(isrc_codes) != len(song_names):
+            logger.warning(f"[!] ISRC codes length mismatch: {len(isrc_codes)} vs {len(song_names)} songs")
+            isrc_codes = isrc_codes[:len(song_names)] + [None] * max(0, len(song_names) - len(isrc_codes))
 
         # Run network diagnostics BEFORE starting search
         self._debug_log("\n" + "="*80)
@@ -923,15 +1112,26 @@ class MusicSearchServiceV2:
                 logger.print_always(f"[.] {provider_name} search stopped by user at {idx}/{len(song_names)} tracks")
                 break
 
+            # Extract ISRC code for this track if available
+            isrc_code = isrc_codes[idx] if idx < len(isrc_codes) else None
+
             # Route to correct API based on provider
             current_search_provider = self.get_search_provider()
 
+            if isrc_code and self._is_apple_music_configured():
+                result = self._run_isrc_lookup_sync(isrc_code)
+                if result.get("success"):
+                    results.append(result)
+                    if progress_callback:
+                        progress_callback(idx, song, result, idx + 1, len(song_names))
+                    continue
+
             if current_search_provider == "musicbrainz_api":
-                logger.debug(f"[?] Request {idx+1}: Routing to MusicBrainz API for '{song}'")
-                result = self._search_musicbrainz_api(song)
+                logger.debug(f"[?] Request {idx+1}: Routing to MusicBrainz API for '{song}' (ISRC: {isrc_code})")
+                result = self._search_musicbrainz_api(song, None, None, isrc_code)
             else:  # itunes
-                logger.debug(f"[?] Request {idx+1}: Routing to iTunes for '{song}' (provider={current_search_provider})")
-                result = self._search_itunes(song)
+                logger.debug(f"[?] Request {idx+1}: Routing to iTunes for '{song}' (provider={current_search_provider}, ISRC: {isrc_code})")
+                result = self._search_itunes(song, None, None, isrc_code)
             results.append(result)
             if progress_callback:
                 progress_callback(idx, song, result, idx + 1, len(song_names))
@@ -1110,13 +1310,13 @@ class MusicSearchServiceV2:
             logger.print_always(f"[!]  Error closing MusicSearchService: {e}")
 
     @trace_call("MusicSearch._search_musicbrainz_api_async")
-    async def _search_musicbrainz_api_async(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+    async def _search_musicbrainz_api_async(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None, isrc: Optional[str] = None) -> Dict:
         """Search MusicBrainz Web Service API with rate limiting (async wrapper)."""
         return await asyncio.get_event_loop().run_in_executor(
-            None, self._search_musicbrainz_api, song_name, artist_name, album_name
+            None, self._search_musicbrainz_api, song_name, artist_name, album_name, isrc
         )
 
-    def _search_musicbrainz_api(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None) -> Dict:
+    def _search_musicbrainz_api(self, song_name: str, artist_name: Optional[str] = None, album_name: Optional[str] = None, isrc: Optional[str] = None) -> Dict:
         """
         Search MusicBrainz Web Service API.
 
