@@ -2,8 +2,6 @@
 
 **Version:** 2.2.0
 **Date:** 2026-01-10
-**Status:** Awaiting Approval
-**Estimated Time:** 26-37 hours
 
 ---
 
@@ -654,31 +652,6 @@ response = httpx.get(url, params=params, headers=headers, timeout=10)
 - [ ] Verify all original CSV columns present
 - [ ] Repeat with "Spotify CSV"
 - [ ] Verify ms_played column in milliseconds
-
----
-
-## Time Estimates
-
-| Part | Task | Time | Complexity |
-|------|------|------|------------|
-| **A1** | Text color fix - Main app | 30 min | Low |
-| **A2** | Text color fix - Splash | 15 min | Low |
-| **A3** | Theme detection logging | 30 min | Low |
-| **A4** | Timestamp restoration | 2-3 hrs | Medium |
-| **A5** | Duration verification | 30 min | Low |
-| **A6** | iTunes country parameter | 2 hrs | Medium |
-| **A7** | Missing album bug fix | 3-4 hrs | Medium |
-| **B1** | Add dependencies | 15 min | Low |
-| **B2** | AppleMusicService module | 6-8 hrs | High |
-| **B3** | Settings UI for API | 2-3 hrs | Medium |
-| **B4** | Search service integration | 2-3 hrs | Medium |
-| **B5** | ISRC column detection | 1 hr | Low |
-| **B6** | ISRC in search loop | 30 min | Low |
-| **C1** | Export formats module | 3-4 hrs | Medium |
-| | **Testing** | 4-6 hrs | - |
-| | **Documentation** | 2-3 hrs | - |
-
-**Total: 29-41 hours**
 
 ---
 

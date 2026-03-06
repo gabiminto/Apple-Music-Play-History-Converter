@@ -63,6 +63,7 @@ _test_csvs/.DS_Store
 # Apple Developer private keys (never commit these)
 *.p8
 AuthKey_*.p8
+_secret/
 apple_music_key.json
 src/apple_music_history_converter/resources/apple_music_key.p8
 src/apple_music_history_converter/resources/apple_music_key.json

@@ -1,4 +1,4 @@
-"""Utility helpers for runtime tracing of Toga UI and backend calls.
+"""Utility helpers for runtime tracing of UI and backend calls.
 
 Set the environment variable ``APPLE_MUSIC_TRACE=1`` to enable tracing.
 Optional environment variables:
@@ -153,7 +153,7 @@ def _prepare_args(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[
 
 
 def instrument_widget(widget: Any, name: str, events: Optional[list[str]] = None) -> Any:
-    """Wrap common Toga widget callbacks (on_press/on_change/...) in trace decorators."""
+    """Wrap common widget callbacks (on_press/on_change/...) in trace decorators."""
 
     if not TRACE_ENABLED or widget is None:
         return widget

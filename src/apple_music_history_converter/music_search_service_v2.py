@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Music Search Service V2 - Comprehensive Implementation
-Integrates with persistent DuckDB MusicBrainz manager and optimization modal.
+Integrates with persistent DuckDB MusicBrainz manager.
 """
 
 import os
@@ -21,7 +21,6 @@ import threading
 try:
     # Use optimized manager by default
     from .musicbrainz_manager_v2_optimized import MusicBrainzManagerV2Optimized as MusicBrainzManagerV2
-    from .optimization_modal import run_with_optimization_modal
     from .trace_utils import TRACE_ENABLED, trace_call, trace_log
     from .app_directories import get_settings_path, get_database_dir
     from .logging_config import get_logger
@@ -30,7 +29,6 @@ try:
 except ImportError:
     # Fall back to optimized manager
     from musicbrainz_manager_v2_optimized import MusicBrainzManagerV2Optimized as MusicBrainzManagerV2
-    from optimization_modal import run_with_optimization_modal
     from trace_utils import TRACE_ENABLED, trace_call, trace_log
     from app_directories import get_settings_path, get_database_dir
     from logging_config import get_logger
@@ -38,6 +36,9 @@ except ImportError:
     from session_aligner import SessionAligner, AlbumSession
 
 logger = get_logger(__name__)
+
+# Default shared Cloudflare Worker proxy URL for Apple Music API
+DEFAULT_APPLE_MUSIC_PROXY_URL = "https://am-proxy.wavedepth.workers.dev"
 
 
 class MusicSearchServiceV2:
@@ -88,10 +89,6 @@ class MusicSearchServiceV2:
         # (background threads read settings, main thread writes settings)
         self._settings_lock = RLock()
 
-        # UI integration
-        self._parent_window = None
-        self._optimization_modal_shown = False
-
         # Exit flag for graceful shutdown
         self.app_exiting = False
 
@@ -100,10 +97,6 @@ class MusicSearchServiceV2:
         self._exit_event = threading.Event()
 
         logger.info("MusicSearchServiceV2 initialized")
-
-    def set_parent_window(self, window):
-        """Set parent window for modal dialogs."""
-        self._parent_window = window
 
     def _load_settings(self) -> Dict:
         """Load settings from JSON file."""
@@ -121,7 +114,8 @@ class MusicSearchServiceV2:
             "search_provider": "musicbrainz",  # Default to local MusicBrainz database
             "auto_fallback": True,
             "itunes_rate_limit": 20,  # Fixed requests per minute for iTunes API
-            "cache_search_results": True  # Cache duplicate track lookups (saves API calls)
+            "cache_search_results": True,  # Cache duplicate track lookups (saves API calls)
+            "apple_music_enabled": True
         }
 
     def _save_settings(self):
@@ -141,8 +135,8 @@ class MusicSearchServiceV2:
         return self.settings.get("search_provider", "musicbrainz")
 
     def set_search_provider(self, provider: str):
-        """Set search provider (musicbrainz, musicbrainz_api, or itunes)."""
-        if provider in ["musicbrainz", "musicbrainz_api", "itunes"]:
+        """Set search provider (musicbrainz, musicbrainz_api, itunes, or apple_music)."""
+        if provider in ["musicbrainz", "musicbrainz_api", "itunes", "apple_music"]:
             with self._settings_lock:
                 self.settings["search_provider"] = provider
                 self._save_settings()
@@ -159,17 +153,43 @@ class MusicSearchServiceV2:
             self._save_settings()
         logger.info(f"Auto-fallback set to: {enabled}")
 
+    def _resolve_proxy_url(self) -> str:
+        """Return the configured proxy URL, falling back to the shared default."""
+        url = str(self.settings.get("apple_music_proxy_url", "")).strip()
+        if url:
+            return url
+        # If no local credentials, use the shared proxy
+        has_local = (
+            self.settings.get("apple_music_team_id")
+            and self.settings.get("apple_music_key_id")
+            and self.settings.get("apple_music_key_path")
+        )
+        if not has_local:
+            return DEFAULT_APPLE_MUSIC_PROXY_URL
+        return ""
+
     def _is_apple_music_configured(self) -> bool:
         """Check if Apple Music API credentials are configured AND enabled."""
         # Check if explicitly disabled
         if not self.settings.get("apple_music_enabled", True):
             return False
 
+        proxy_url = self._resolve_proxy_url()
+        if proxy_url.startswith("http://") or proxy_url.startswith("https://"):
+            return True
+
         # All three credentials must be set for Apple Music API to work
         team_id = self.settings.get("apple_music_team_id")
         key_id = self.settings.get("apple_music_key_id")
         key_path = self.settings.get("apple_music_key_path")
-        return bool(team_id and key_id and key_path)
+        if team_id and key_id and key_path:
+            return True
+
+        try:
+            from .apple_music_service import AppleMusicService
+            return AppleMusicService.has_builtin_credentials()
+        except Exception:
+            return False
 
     def _get_apple_music_service(self):
         """Get or create Apple Music API service instance."""
@@ -178,12 +198,14 @@ class MusicSearchServiceV2:
                 try:
                     from .apple_music_service import AppleMusicService
 
-                    # Use user-configured credentials (required for API access)
+                    # Use user-configured credentials or fall back to shared proxy
                     self.apple_music_service = AppleMusicService(
                         team_id=self.settings.get("apple_music_team_id"),
                         key_id=self.settings.get("apple_music_key_id"),
                         private_key_path=self.settings.get("apple_music_key_path"),
-                        storefront=self.settings.get("itunes_country", "us")
+                        storefront=self.settings.get("itunes_country", "us"),
+                        proxy_base_url=self._resolve_proxy_url(),
+                        proxy_api_key=self.settings.get("apple_music_proxy_key"),
                     )
                     logger.info("[AM API] Apple Music service initialized")
                 except Exception as e:
@@ -289,7 +311,7 @@ class MusicSearchServiceV2:
     @trace_call("MusicSearch.ensure_musicbrainz_ready")
     async def ensure_musicbrainz_ready(self) -> bool:
         """
-        Ensure MusicBrainz is ready, showing optimization modal if needed.
+        Ensure MusicBrainz is ready by running one-time optimization when needed.
 
         Returns:
             True if MusicBrainz is ready, False if not available
@@ -298,10 +320,9 @@ class MusicSearchServiceV2:
         logger.debug("ensure_musicbrainz_ready: csv_available=%s ready=%s", csv_available, self.musicbrainz_manager.is_ready())
         if TRACE_ENABLED:
             trace_log.debug(
-                "ensure_musicbrainz_ready: csv_available=%s ready=%s modal_shown=%s thread=%s",
+                "ensure_musicbrainz_ready: csv_available=%s ready=%s thread=%s",
                 csv_available,
                 self.musicbrainz_manager.is_ready(),
-                self._optimization_modal_shown,
                 threading.current_thread().name,
             )
 
@@ -315,63 +336,29 @@ class MusicSearchServiceV2:
                 trace_log.debug("ensure_musicbrainz_ready -> already ready")
             return True
 
-        # Show optimization modal if we have a parent window
-        # NOTE: Removed thread check - Toga's async runs on event loop, not necessarily main thread
-        # The modal is safe to use as long as we have a parent window reference
-        use_modal = (
-            self._parent_window is not None
-            and not self._optimization_modal_shown
-        )
+        logger.print_always("[T] Starting optimization (background thread)...")
+        optimization_started = self.musicbrainz_manager.start_optimization_if_needed()
 
-        if use_modal:
-            # Use modal to start and wait for optimization
-            self._optimization_modal_shown = True
-            try:
-                logger.print_always("[T] Starting optimization with modal...")
-                await run_with_optimization_modal(
-                    self._parent_window,
-                    self.musicbrainz_manager.run_optimization_synchronously,
-                    cancellation_callback=self.musicbrainz_manager.cancel_optimization
-                )
-                logger.print_always("[OK] MusicBrainz optimization completed via modal")
-                if TRACE_ENABLED:
-                    trace_log.debug("Optimization modal completed successfully")
-            except Exception as e:
-                # Check if it was a user cancellation
-                if "cancelled by user" in str(e).lower():
-                    logger.warning("[!] Optimization cancelled by user")
-                    return False
-                # Fall back to iTunes for this session on other errors
-                self.set_search_provider("itunes")
-                logger.error(f"[!] MusicBrainz optimization modal failed: {e}")
-                if TRACE_ENABLED:
-                    trace_log.exception("Optimization modal failed: %s", e)
-                return False
-        else:
-            # No UI available or running off the main thread; start optimization and wait silently
-            logger.print_always("[T] Starting optimization without modal (background thread)...")
-            optimization_started = self.musicbrainz_manager.start_optimization_if_needed()
+        if not optimization_started:
+            logger.error("[X] Failed to start optimization - CSV not available")
+            return False
 
-            if not optimization_started:
-                logger.error("[X] Failed to start optimization - CSV not available")
-                return False
+        # Use ASYNC wait to avoid blocking the UI
+        # NOTE: Do NOT call wait_until_ready() here - it uses blocking time.sleep()
+        # Timeout increased to 1 hour - optimization of 29M row database takes 30-60 minutes
+        logger.print_always("[~] Waiting for MusicBrainz optimization to complete (async)...")
+        logger.print_always("    NOTE: This may take 30-60 minutes for large databases")
+        start_time = time.time()
+        timeout = 3600.0  # 1 hour timeout for large databases
+        while not self.musicbrainz_manager.is_ready() and (time.time() - start_time) < timeout:
+            await asyncio.sleep(0.5)  # Use async sleep to keep UI responsive
 
-            # Use ASYNC wait to avoid blocking the UI
-            # NOTE: Do NOT call wait_until_ready() here - it uses blocking time.sleep()
-            # Timeout increased to 1 hour - optimization of 29M row database takes 30-60 minutes
-            logger.print_always("[~] Waiting for MusicBrainz optimization to complete (async)...")
-            logger.print_always("    NOTE: This may take 30-60 minutes for large databases")
-            start_time = time.time()
-            timeout = 3600.0  # 1 hour timeout for large databases
-            while not self.musicbrainz_manager.is_ready() and (time.time() - start_time) < timeout:
-                await asyncio.sleep(0.5)  # Use async sleep to keep UI responsive
-
-            if not self.musicbrainz_manager.is_ready():
-                self.set_search_provider("itunes")
-                logger.warning("[!] MusicBrainz optimization timed out; switching to iTunes")
-                if TRACE_ENABLED:
-                    trace_log.warning("Optimization wait timed out; switching provider to iTunes")
-                return False
+        if not self.musicbrainz_manager.is_ready():
+            self.set_search_provider("itunes")
+            logger.warning("[!] MusicBrainz optimization timed out; switching to iTunes")
+            if TRACE_ENABLED:
+                trace_log.warning("Optimization wait timed out; switching provider to iTunes")
+            return False
 
         ready = self.musicbrainz_manager.is_ready()
         logger.print_always(f"[OK] MusicBrainz readiness check complete: {ready}")
@@ -498,6 +485,25 @@ class MusicSearchServiceV2:
         elif provider == "itunes":
             # Direct iTunes search
             return await self._search_itunes_async(song_name, artist_name, album_name)
+
+        elif provider == "apple_music":
+            if not self._is_apple_music_configured():
+                return {
+                    "success": False,
+                    "source": "apple_music",
+                    "error": "Apple Music API credentials are not configured"
+                }
+
+            result = await self._search_apple_music_text(song_name, artist_name, album_name)
+            if result["success"]:
+                return result
+
+            if auto_fallback:
+                if TRACE_ENABLED:
+                    trace_log.debug("Apple Music miss for %s - falling back to iTunes", song_name)
+                return await self._search_itunes_async(song_name, artist_name, album_name)
+
+            return result
 
         else:
             return {

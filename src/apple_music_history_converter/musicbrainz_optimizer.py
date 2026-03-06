@@ -630,7 +630,7 @@ def run_optimization_with_progress(parent_window=None, csv_path: Optional[Path] 
     Convenience function to run optimization.
 
     Args:
-        parent_window: Optional Toga window for modal (not used in minimal version)
+        parent_window: Optional UI window reference (currently unused)
         csv_path: Optional path to CSV file
 
     Returns:

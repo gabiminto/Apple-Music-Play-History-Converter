@@ -1,0 +1,17 @@
+name = "am-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-02-14"
+account_id = "2ae22052b7c83771f0f2ae82345fdf38"
+
+[vars]
+PROXY_ENABLED = "true"
+REQUESTS_PER_MINUTE = "120"
+DEVELOPER_TOKEN_TTL_SECONDS = "3600"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiterDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiterDO"]
