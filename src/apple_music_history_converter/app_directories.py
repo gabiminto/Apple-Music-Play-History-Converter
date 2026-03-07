@@ -135,7 +135,7 @@ def get_testing_settings() -> dict:
     Testing mode is disabled by default to ensure zero overhead for regular users.
     Enable via:
     - Settings file: {"testing": {"enabled": true}}
-    - Command line: python run_toga_app.py --test-mode
+    - Sidecar/session flags in the current runtime environment
     - Environment variable: TEST_MODE=1
 
     Returns:

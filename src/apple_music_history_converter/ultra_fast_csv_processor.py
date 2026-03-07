@@ -251,14 +251,14 @@ class UltraFastCSVProcessor:
         unique_df = df[['track_clean', 'album_clean']].drop_duplicates()
         return unique_df.reset_index(drop=True)
 
-    def _batch_search(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, str]:
+    def _batch_search(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, Dict]:
         """
         Batch search all unique tracks using massive SQL queries.
 
         This is the core optimization - single query for thousands of tracks!
         ALWAYS uses album info when available for better accuracy.
 
-        Returns Dict[track_clean, artist] for compatibility with existing code.
+        Returns Dict[track_clean, {"artist": str, "album": str}] for comprehensive matching.
         """
         if unique_df.empty:
             return {}
@@ -273,7 +273,7 @@ class UltraFastCSVProcessor:
         # PERFORMANCE MODE: Use HOT/COLD table cascade with album
         return self._batch_search_performance_mode_with_album(unique_df, progress_callback)
 
-    def _batch_search_efficiency_mode_with_album_v2(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, str]:
+    def _batch_search_efficiency_mode_with_album_v2(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, Dict]:
         """
         EFFICIENCY MODE: Album-aware BATCHED search for better accuracy AND speed.
 
@@ -283,10 +283,10 @@ class UltraFastCSVProcessor:
         3. Fall back to best-score for tracks without album match
         4. FUZZY PASS: Strip parenthetical content for unmatched tracks and retry
 
-        Returns Dict[track_clean, artist] for compatibility.
+        Returns Dict[track_clean, {"artist": str, "album": str}] for comprehensive matching.
         """
         import re
-        track_to_artist = {}
+        track_to_result = {}
         total = len(unique_df)
 
         logger.print_always(f"\n[>] EFFICIENCY MODE: Album-aware BATCH search ({total:,} unique tracks)...")
@@ -349,7 +349,7 @@ class UltraFastCSVProcessor:
                 SELECT
                     recording_lower,
                     artist_credit_name,
-                    release_lower,
+                    release_name,
                     score
                 FROM musicbrainz
                 WHERE recording_lower IN ({placeholders})
@@ -389,23 +389,23 @@ class UltraFastCSVProcessor:
             # Try to find album match first
             if user_album:
                 for artist, db_album, score in candidates:
-                    if user_album in db_album.lower() or db_album.lower() in user_album:
-                        track_to_artist[track] = artist
+                    if db_album and (user_album in db_album.lower() or db_album.lower() in user_album):
+                        track_to_result[track] = {"artist": artist, "album": db_album}
                         found_with_album += 1
                         self.stats['hot_hits'] += 1
                         break
 
             # If no album match, use first (lowest score = oldest/most established)
-            if track not in track_to_artist and candidates:
-                track_to_artist[track] = candidates[0][0]
+            if track not in track_to_result and candidates:
+                track_to_result[track] = {"artist": candidates[0][0], "album": candidates[0][1]}
                 found_without_album += 1
                 self.stats['cold_hits'] += 1
 
-        exact_found = len(track_to_artist)
+        exact_found = len(track_to_result)
         logger.print_always(f"   [OK] Found {exact_found:,} with exact match")
 
         # Phase 3: FUZZY MATCHING - Strip parenthetical content for unmatched tracks
-        unmatched = [t for t in all_tracks if t not in track_to_artist]
+        unmatched = [t for t in all_tracks if t not in track_to_result]
 
         if unmatched:
             logger.print_always(f"\n[>] Phase 3: Fuzzy matching for {len(unmatched):,} unmatched tracks...")
@@ -444,7 +444,7 @@ class UltraFastCSVProcessor:
                         SELECT
                             recording_lower,
                             artist_credit_name,
-                            release_lower,
+                            release_name,
                             score
                         FROM musicbrainz
                         WHERE recording_lower IN ({placeholders})
@@ -473,8 +473,8 @@ class UltraFastCSVProcessor:
                     matched = False
                     if user_album:
                         for artist, db_album, score in candidates:
-                            if user_album in db_album.lower() or db_album.lower() in user_album:
-                                track_to_artist[original_track] = artist
+                            if db_album and (user_album in db_album.lower() or db_album.lower() in user_album):
+                                track_to_result[original_track] = {"artist": artist, "album": db_album}
                                 fuzzy_album_match += 1
                                 self.stats['hot_hits'] += 1
                                 matched = True
@@ -482,7 +482,7 @@ class UltraFastCSVProcessor:
 
                     # Fall back to best score
                     if not matched and candidates:
-                        track_to_artist[original_track] = candidates[0][0]
+                        track_to_result[original_track] = {"artist": candidates[0][0], "album": candidates[0][1]}
                         fuzzy_fallback += 1
                         self.stats['cold_hits'] += 1
 
@@ -491,7 +491,7 @@ class UltraFastCSVProcessor:
                 logger.print_always(f"      Album match: {fuzzy_album_match:,}, Score fallback: {fuzzy_fallback:,}")
 
         # Final stats
-        not_found = len(all_tracks) - len(track_to_artist)
+        not_found = len(all_tracks) - len(track_to_result)
         self.stats['not_found'] = not_found
 
         logger.print_always(f"\n[OK] Search complete:")
@@ -499,9 +499,9 @@ class UltraFastCSVProcessor:
         logger.print_always(f"   [i] Score fallback: {found_without_album:,}")
         logger.print_always(f"   [!] Not found: {not_found:,}")
 
-        return track_to_artist
+        return track_to_result
 
-    def _batch_search_performance_mode_with_album(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, str]:
+    def _batch_search_performance_mode_with_album(self, unique_df: pd.DataFrame, progress_callback: Optional[Callable] = None) -> Dict[str, Dict]:
         """
         PERFORMANCE MODE: Album-aware HOT/COLD cascade search.
 
@@ -510,9 +510,9 @@ class UltraFastCSVProcessor:
         2. Search COLD table for misses
         3. Fall back to track-only for remaining
 
-        Returns Dict[track_clean, artist] for compatibility.
+        Returns Dict[track_clean, {"artist": str, "album": str}] for comprehensive matching.
         """
-        track_to_artist = {}
+        track_to_result = {}
         total = len(unique_df)
 
         logger.print_always(f"\n[>] PERFORMANCE MODE: Album-aware HOT/COLD search ({total:,} tracks)...")
@@ -539,7 +539,7 @@ class UltraFastCSVProcessor:
                     # Clean album for PERFORMANCE mode (remove parens etc)
                     album_clean = album.lower().strip()
                     result = self.conn.execute("""
-                        SELECT artist_credit_name
+                        SELECT artist_credit_name, release_name
                         FROM musicbrainz_hot
                         WHERE recording_clean = ?
                         AND release_lower LIKE ?
@@ -548,13 +548,13 @@ class UltraFastCSVProcessor:
                     """, [track, f"%{album_clean}%"]).fetchone()
 
                     if result:
-                        track_to_artist[track] = result[0]
+                        track_to_result[track] = {"artist": result[0], "album": result[1]}
                         self.stats['hot_hits'] += 1
                 except Exception:
                     pass
 
         # Phase 2: HOT table track-only for remaining
-        remaining = [t for t in all_tracks if t not in track_to_artist]
+        remaining = [t for t in all_tracks if t not in track_to_result]
         if remaining:
             for i in range(0, len(remaining), self.batch_size):
                 batch = remaining[i:i+self.batch_size]
@@ -565,7 +565,7 @@ class UltraFastCSVProcessor:
 
                 placeholders = ','.join(['?' for _ in batch])
                 sql = f"""
-                    SELECT recording_clean, artist_credit_name
+                    SELECT recording_clean, artist_credit_name, release_name
                     FROM musicbrainz_hot
                     WHERE recording_clean IN ({placeholders})
                     QUALIFY ROW_NUMBER() OVER (PARTITION BY recording_clean ORDER BY score ASC) = 1
@@ -573,15 +573,15 @@ class UltraFastCSVProcessor:
 
                 try:
                     results = self.conn.execute(sql, batch).fetchall()
-                    for track, artist in results:
-                        if track not in track_to_artist:
-                            track_to_artist[track] = artist
+                    for track, artist, album in results:
+                        if track not in track_to_result:
+                            track_to_result[track] = {"artist": artist, "album": album}
                             self.stats['hot_hits'] += 1
                 except Exception as e:
                     logger.error(f"HOT batch failed: {e}")
 
         # Phase 3: COLD table for remaining
-        remaining = [t for t in all_tracks if t not in track_to_artist]
+        remaining = [t for t in all_tracks if t not in track_to_result]
         if remaining:
             logger.print_always(f"\n[SNOW] Phase 2: COLD table for {len(remaining):,} misses...")
 
@@ -594,7 +594,7 @@ class UltraFastCSVProcessor:
 
                 placeholders = ','.join(['?' for _ in batch])
                 sql = f"""
-                    SELECT recording_clean, artist_credit_name
+                    SELECT recording_clean, artist_credit_name, release_name
                     FROM musicbrainz_cold
                     WHERE recording_clean IN ({placeholders})
                     QUALIFY ROW_NUMBER() OVER (PARTITION BY recording_clean ORDER BY score ASC) = 1
@@ -602,20 +602,20 @@ class UltraFastCSVProcessor:
 
                 try:
                     results = self.conn.execute(sql, batch).fetchall()
-                    for track, artist in results:
-                        if track not in track_to_artist:
-                            track_to_artist[track] = artist
+                    for track, artist, album in results:
+                        if track not in track_to_result:
+                            track_to_result[track] = {"artist": artist, "album": album}
                             self.stats['cold_hits'] += 1
                 except Exception as e:
                     logger.error(f"COLD batch failed: {e}")
 
         # Stats
-        not_found = len(all_tracks) - len(track_to_artist)
+        not_found = len(all_tracks) - len(track_to_result)
         self.stats['not_found'] = not_found
 
-        logger.print_always(f"\n[OK] Search complete: {len(track_to_artist):,} found, {not_found:,} not found")
+        logger.print_always(f"\n[OK] Search complete: {len(track_to_result):,} found, {not_found:,} not found")
 
-        return track_to_artist
+        return track_to_result
 
     def _batch_search_performance_mode(self, unique_tracks: list, progress_callback: Optional[Callable] = None) -> Dict[str, str]:
         """

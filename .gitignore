@@ -10,8 +10,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -60,6 +60,14 @@ _test_csvs/.DS_Store
 # Environment variables (contains sensitive credentials)
 .env
 
+# Apple Developer private keys (never commit these)
+*.p8
+AuthKey_*.p8
+_secret/
+apple_music_key.json
+src/apple_music_history_converter/resources/apple_music_key.p8
+src/apple_music_history_converter/resources/apple_music_key.json
+
 # Claude files
 claude.md
 .claude/
@@ -96,3 +104,5 @@ Desktop.ini
 # Shell scripts (temporary/testing)
 build_all_platforms.sh
 test_build.sh
+
+.worktrees

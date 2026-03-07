@@ -1,256 +1,109 @@
 # Apple Music Play History Converter
 
-![Apple Music Play History Converter](images/aphc_logo.png)
+Convert your Apple Music play history CSV exports into formats compatible with Last.fm, Spotify, ListenBrainz, and more.
 
-![Version 2.0.3 built with Toga/Briefcase](images/screenshot-v5.png)
+![Screenshot](docs/screenshot.jpg)
 
-A modern desktop application that converts Apple Music play history CSV files into Last.fm and Universal Scrobbler compatible format.
+## Download
 
-> **New in v2.0.3**: Major matching algorithm improvements with new MusicBrainz optimizer, and comprehensive documentation. [See what's new](#whats-new-in-v203)
+Download the latest release for your platform from the [Releases](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases) page:
+
+- **macOS** — `.dmg` (signed and notarized)
+- **Windows** — `.msi` installer or `.exe` (NSIS)
 
 ## Features
 
-- **Multi-Format Support**: Works with "Play Activity", "Recently Played Tracks", and "Play History Daily Tracks" CSV files
-- **Three Search Providers**:
-  - **MusicBrainz (Local DB)**: Offline database (~2GB) with 10,000+ tracks/sec search speed
-  - **MusicBrainz API (Online)**: Direct API access with 1 req/sec rate limit (no database download needed)
-  - **iTunes API**: Online fallback with adaptive rate limiting (20-120 req/min)
-- **Ultra-Fast Processing**: Batch processing handles large files 100x faster than previous versions
-- **Live Progress Tracking**: Real-time updates showing exactly what's happening during searches
-- **Smart Auto-Save**: Automatic checkpoints every 50 tracks protect your progress
-- **Rate-Limited Track Management**: Separate retry and export system for iTunes 403 rate limit errors
-  - Retry button for tracks that hit rate limits
-  - Export rate-limited tracks to CSV for manual review
-  - Smart separation of temporary (rate-limited) vs permanent failures
-- **Cross-Platform**: Native apps for Windows, macOS, and Linux
-- **100% Local Processing**: Your music data never leaves your computer
+- **Load any Apple Music CSV export** — Play Activity, Recently Played Tracks, or Play History Daily Tracks
+- **Preview and edit** before searching — fix artist/track/album names inline with resizable columns
+- **4 search providers** with real-time status badges:
+  - iTunes API
+  - MusicBrainz API
+  - MusicBrainz Local Database (offline, fastest)
+  - Apple Music API (via shared proxy)
+- **5 export formats**: Last.fm CSV, Spotify CSV, Universal CSV, iTunes XML, ListenBrainz JSON
+- **Smart rate limiting** — per-provider controls, pause/resume, skip wait
+- **Resume support** — stop and pick up where you left off
+- **Retry workflows** — re-search missing or rate-limited tracks with any provider
+- **Album matching** — all providers return album data when available
+- Dark and light mode
 
-## Quick Start
+## How to Get Your Apple Music Data
 
-### Download & Install
-
-**No Python required.** Download the ready-to-run app for your platform:
-
-#### macOS (Universal Binary)
-**[Download Apple Music History Converter-2.0.3.dmg](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases/latest)**
-
-**Fully signed and notarized** by Apple Developer ID
-**No security warnings**, opens immediately
-**Works on Apple Silicon (M1/M2/M3) and Intel Macs**
-
-**Installation:**
-1. Download the DMG file
-2. Open the DMG and drag the app to your Applications folder
-3. Double-click to run, no configuration needed
-
----
-
-#### Windows (MSI Installer)
-**[Download Apple-Music-History-Converter-2.0.3.msi](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases/latest)**
-
-**Professional MSI installer**
-**No Python installation required**
-**Works on Windows 10 and Windows 11**
-
-**Installation:**
-1. Download the MSI file
-2. Double-click to install
-3. App appears in Start Menu: "Apple Music History Converter"
-
----
-
-#### Linux (Compile from Source)
-**No pre-built binaries available**, Linux users must compile from source
-
-**Installation:**
-```bash
-git clone https://github.com/nerveband/Apple-Music-Play-History-Converter.git
-cd Apple-Music-Play-History-Converter
-pip install -r requirements.txt
-python run_toga_app.py
-```
-
-**Requirements:**
-- Python 3.12+
-- GTK 3 development libraries
-- See [Linux Build Guide](wiki/Installation.md) for distribution-specific instructions
-
-### Run from Source
-
-```bash
-git clone https://github.com/nerveband/Apple-Music-Play-History-Converter.git
-cd Apple-Music-Play-History-Converter
-pip install -r requirements.txt
-python run_toga_app.py
-```
+1. Go to [privacy.apple.com](https://privacy.apple.com)
+2. Sign in and select **Request a copy of your data**
+3. Select **Apple Media Services information** (this includes Apple Music)
+4. Choose your preferred file size and submit
+5. Wait for Apple to prepare your data (usually 1-7 days)
+6. Download and unzip — look for CSV files like `Apple Music - Play History Daily Tracks.csv`
 
 ## Usage
 
-1. **Select your CSV file** from Apple Music
-2. **Choose search provider**:
-   - MusicBrainz (recommended for large files, requires 2GB database download)
-   - iTunes API (slower but works immediately)
-3. **Click "Search for Missing Artists"** to find missing artist information
-4. **Save** the converted CSV file for Last.fm or Universal Scrobbler
+1. Open the app and load your CSV file (drag and drop or click to browse)
+2. Preview your tracks — edit any incorrect entries
+3. Choose a search provider from the sidebar
+4. Click **Search** and watch progress in real-time
+5. Export your results in your preferred format
 
-## Artist Matching: What to Expect
+## Building from Source
 
-The app achieves **** on typical music libraries, but some tracks may not match correctly. Here's what you should know:
+### Prerequisites
 
-### What Works Well
-- **Popular music**: Mainstream tracks match instantly (The Weeknd, Taylor Swift, etc.)
-- **Albums you've listened to completely**: The app detects album "sessions" and applies consistent artist credits
-- **Tracks with artist info in your CSV**: When Apple provides artist names, matching is highly accurate
+- Node.js 20+
+- Rust toolchain (via [rustup](https://rustup.rs))
+- Python 3.8+
 
-### What May Not Match
-| Scenario | Why It Happens | Workaround |
-|----------|----------------|------------|
-| **Generic titles** ("Intro", "Home", "Escape") | Many artists have songs with these names | App needs artist hint from your CSV |
-| **Japanese/Korean/non-Latin text** | Different romanizations exist | iTunes API often works better |
-| **Typos in your data** ("fuckk" vs "fuck") | Exact matching fails | iTunes API handles fuzzy matching |
-| **Obscure indie releases** | Not in MusicBrainz database | Try iTunes API or manual entry |
-| **Soundtracks** ("Scott Pilgrim", video game music) | Often missing from databases | iTunes API usually finds these |
-| **Classical music** with movement numbers | Naming conventions vary wildly | May require manual correction |
-| **Mashups/medleys** | Combined tracks don't exist as single entries | Usually won't match |
+### Setup
 
-### Tips for Best Results
-1. **Use MusicBrainz first** - it's fast and handles most tracks
-2. **Use iTunes API for leftovers** - it has better fuzzy matching but is rate-limited
-3. **Review your results** - spot-check the output before importing to Last.fm
-4. **Export failures for manual review** - use the "Export Missing" button
+```bash
+cd tauri-app
+npm install
 
-For technical details on how matching works, see:
-- [Matching Algorithm Wiki](wiki/Matching-Algorithm.md) - Full technical documentation
-- [MusicBrainz Matching Algorithm](docs/MUSICBRAINZ_MATCHING_ALGORITHM.md) - Database and search details
+cd python-sidecar
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-## What's New in v2.0.3
+### Run in development
 
-### Enhanced Matching Algorithm 
+```bash
+cd tauri-app
+npm run tauri dev
+```
 
-- **Improved artist matching**: New scoring system prioritizes established tracks over covers
-- **Edge case handling**: Better detection of generic titles ("Intro", "Home") and short titles
-- **Unicode normalization**: Handles curly quotes, apostrophe variants, and special characters (A$AP, Ke$ha)
-- **Artist tokenization**: Properly handles collaborations ("feat.", "&", "with", "vs")
-- **Phonetic matching**: Soundex-based matching for artist name misspellings (Jon/John, Smith/Smyth)
-- **Album-session alignment**: Consecutive tracks from same album get consistent artist credits
+### Build for production
 
-### New MusicBrainz Optimizer
+```bash
+cd tauri-app
+npm run tauri build
+```
 
-- **Background optimization**: Database optimization runs without blocking the UI
-- **Progress tracking**: Real-time progress updates during optimization
-- **Memory efficiency**: Optimized for systems with 4GB+ RAM
+The built app will be in `tauri-app/src-tauri/target/release/bundle/`.
 
-### Hardware-Adaptive Performance Modes
+## Testing
 
-The app now automatically detects your system's capabilities and adjusts its optimization strategy:
+```bash
+# Frontend tests
+cd tauri-app && npm run test
 
-| Mode | Requirements | What It Does |
-|------|--------------|--------------|
-| **Performance** | 8GB+ RAM, fast SSD | Full optimization with HOT/COLD tables and all indexes |
-| **Efficiency** | 4GB RAM, any disk | Minimal schema for slower systems (tested on AWS t2.medium) |
+# Rust compilation check
+cd tauri-app/src-tauri && cargo check
 
-- **Automatic detection**: Probes RAM, CPU cores, and disk speed at startup
-- **Works on budget hardware**: Efficiency mode tested on AWS t2.medium (2 vCPUs, 4GB RAM, slow EBS)
-- **No configuration needed**: The app picks the right mode automatically
+# Python sidecar tests
+cd tauri-app/python-sidecar && python3 test_sidecar.py
+```
 
-### Code Quality & Performance
+## Project Layout
 
-- **Dead code removal**: Cleaned up legacy debug scripts and unused code
-- **Windows compatibility**: Fixed console encoding issues with emojis (replaced with ASCII indicators)
-- **Test suite**: 204 tests passing with comprehensive coverage
-- **Documentation**: New [Matching Algorithm](docs/MUSICBRAINZ_MATCHING_ALGORITHM.md) technical documentation
-
-### Previous Release (v2.0.2)
-
-## What's New in v2.0.2
-
-### Critical macOS Exit Crash Fixed
-
-- **Toga/Rubicon GIL Crash Resolved**: Eliminated fatal Python GIL crash that occurred when quitting the app on macOS
-  - Crash occurred in Toga's event loop shutdown during `NSApplication.terminate()`
-  - Implemented proper cleanup sequence with `os._exit()` workaround for framework limitation
-  - Replaced asyncio's default executor with tracked custom executor for proper shutdown
-  - Added threading.Event for interruptible sleeps in rate limiting code
-  - All ThreadPoolExecutors now properly tracked and shut down before exit
-  - App now quits cleanly every time without "Abort trap 6" errors
-  - See `TOGA_EXIT_CRASH_WORKAROUND.md` for complete technical documentation
-
-### Comprehensive Documentation
-
-- **Build & Release Guide**: Complete documentation in CLAUDE.md (983 lines added)
-  - Step-by-step macOS build process with expected durations
-  - Windows automated build workflow and monitoring commands
-  - Complete release checklist (pre-release, release day, post-release)
-  - Rollback procedures for handling bad releases
-  - Common build issues and solutions table
-
-- **Development Workflow**: Standard practices for future development
-  - Branch strategy and naming conventions
-  - Commit message standards (conventional commits)
-  - Testing requirements with coverage goals
-  - Code quality standards and review checklist
-  - Feature development 6-phase workflow
-  - Performance optimization guidelines
-  - Debugging techniques for development and production
-
-### v2.0.1 Previous Fixes
-
-- **Search Resume Fixed**: Resolved "search already in progress" error that prevented resuming searches
-- **Rate Limit Sleep Improved**: Replaced blocking 60-second sleeps with interruptible system
-
-### v2.0 Major Features
-
-- **100x Faster**: Batch processing with DuckDB replaces old row-by-row searches
-- **Smart Rate Limiting**: Adaptive iTunes API rate limiting (20-120 req/min)
-- **Live Updates**: See results as they arrive, not after everything completes
-- **Never Freezes**: Fully async UI stays responsive during processing
-- **Auto-Save**: Progress automatically saved every 50 tracks
-- **Better Architecture**: Clean separation of UI and processing threads
-
-### Technical Changes
-
-- **Toga Framework**: Modern cross-platform native UI (replaces tkinter)
-- **Thread-Safe**: Enhanced async/await patterns with comprehensive cleanup
-- **DuckDB Backend**: Optimized MusicBrainz queries with vectorized pandas operations
-- **Code Quality**: Removed 1,051 lines of dead code and legacy methods
-
-[See full changelog](CHANGELOG.md)
-
-## Documentation
-
-- [Installation Guide](wiki/Installation.md)
-- [User Guide](wiki/User-Guide.md)
-- [MusicBrainz Database Setup](wiki/MusicBrainz-Database.md)
-- [Building from Source](wiki/Building-from-Source.md)
-- [Development Guide](wiki/Development.md)
-- [Troubleshooting](wiki/Troubleshooting.md)
-
-## System Requirements
-
-### Minimum
-- **RAM**: 4GB (iTunes API) or 8GB (MusicBrainz)
-- **Storage**: 200MB app + 3GB for MusicBrainz database (optional)
-- **OS**: macOS 10.13+, Windows 10+, or modern Linux
-
-### Recommended
-- **RAM**: 8GB or more
-- **Storage**: SSD for faster database operations
-- **Internet**: Broadband for database download
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/nerveband/Apple-Music-Play-History-Converter/issues)
-- **Wiki**: [Documentation](wiki/Home.md)
-- **Releases**: [Download Page](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases)
+```
+tauri-app/                          Tauri application
+  src/                              React + TypeScript frontend
+  src-tauri/                        Rust backend
+  python-sidecar/                   Python sidecar (search/export engine)
+src/apple_music_history_converter/  Shared Python backend modules
+cloudflare-worker/                  Apple Music API proxy (Cloudflare Workers)
+```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details
-
-## Credits
-
-Built with [BeeWare Toga](https://beeware.org/) • [Pandas](https://pandas.pydata.org/) • [DuckDB](https://duckdb.org/)
-
----
-
-**Version 2.0.3** | [Changelog](CHANGELOG.md) | [Wiki](wiki/Home.md) | [Report Issue](https://github.com/nerveband/Apple-Music-Play-History-Converter/issues)
+MIT

@@ -451,9 +451,13 @@ class MusicBrainzManagerV2Optimized:
 
         # OPTIMIZATION: LRU search cache (10k entries)
         self._search_cache: Dict[Tuple[str, str, str], Optional[str]] = {}
+        self._album_cache: Dict[Tuple[str, str, str], str] = {}
         self._cache_access_order: deque = deque()
         self._cache_hits = 0
         self._cache_misses = 0
+
+        # Last matched album (set during search for caller to read)
+        self._last_album: str = ""
 
         # OPTIMIZATION: Pre-cached artist popularity scores
         self._artist_score_cache: Dict[str, float] = {}
@@ -886,6 +890,12 @@ class MusicBrainzManagerV2Optimized:
             except Exception:
                 pass
 
+            # Set query timeout (45 seconds) to prevent runaway queries
+            try:
+                self._conn.execute("SET query_timeout=45000")
+            except Exception:
+                pass
+
             logger.info(f"Connected to DuckDB with {memory_limit}GB RAM, 8 threads, compression")
             logger.print_always(f"   [OK] DuckDB configured successfully")
 
@@ -932,11 +942,10 @@ class MusicBrainzManagerV2Optimized:
             except Exception:
                 pass
 
-            # Windows-specific: Reduce thread count to avoid system overload
-            # 8 threads on limited-RAM Windows systems causes severe slowdown
+            # Windows-specific: Use 6 threads (compromise between performance and stability)
             try:
-                self._conn.execute("SET threads TO 4")
-                logger.print_always("   [>] Windows: Reduced threads to 4 (prevents system overload)")
+                self._conn.execute("SET threads TO 6")
+                logger.print_always("   [>] Windows: threads set to 6")
             except Exception:
                 pass
 
@@ -2734,7 +2743,7 @@ class MusicBrainzManagerV2Optimized:
 
         # Single scan query with CASE ordering (exact > prefix > contains)
         sql = f"""
-            SELECT artist_credit_name
+            SELECT artist_credit_name, release_name
             FROM musicbrainz
             WHERE {where_clause}
             ORDER BY
@@ -2753,7 +2762,9 @@ class MusicBrainzManagerV2Optimized:
         try:
             row = self._conn.execute(sql, params).fetchone()
             if row:
+                self._last_album = row[1] or ""
                 return row[0]
+            self._last_album = ""
             return None
         except Exception as e:
             logger.error(f"Simple search error: {e}")
@@ -2791,6 +2802,7 @@ class MusicBrainzManagerV2Optimized:
             self._cache_access_order.append(cache_key)
 
             result = self._search_cache[cache_key]
+            self._last_album = self._album_cache.get(cache_key, "")
             elapsed = (time.time() - search_start) * 1000
             logger.debug(f"[>] CACHE HIT: '{track_name}' -> '{result}' in {elapsed:.2f}ms")
             return result
@@ -2805,7 +2817,9 @@ class MusicBrainzManagerV2Optimized:
             if len(self._search_cache) >= LRU_CACHE_SIZE:
                 oldest_key = self._cache_access_order.popleft()
                 del self._search_cache[oldest_key]
+                self._album_cache.pop(oldest_key, None)
             self._search_cache[cache_key] = result
+            self._album_cache[cache_key] = self._last_album
             self._cache_access_order.append(cache_key)
             elapsed = (time.time() - search_start) * 1000
             logger.debug(f"Simple search for '{track_name}' completed in {elapsed:.2f}ms (result: {result})")
@@ -2835,8 +2849,10 @@ class MusicBrainzManagerV2Optimized:
         if len(self._search_cache) >= LRU_CACHE_SIZE:
             oldest_key = self._cache_access_order.popleft()
             del self._search_cache[oldest_key]
+            self._album_cache.pop(oldest_key, None)
 
         self._search_cache[cache_key] = result
+        self._album_cache[cache_key] = self._last_album
         self._cache_access_order.append(cache_key)
 
         elapsed = (time.time() - search_start) * 1000
@@ -3205,10 +3221,14 @@ class MusicBrainzManagerV2Optimized:
 
         if best_aligned:
             logger.debug(f"[OK] Selected ALBUM-ALIGNED candidate: '{best_aligned[0]}' (score: {best_aligned_score:,.0f})")
+            self._last_album = best_aligned[1] if len(best_aligned) > 1 else ""
             return best_aligned[0]
 
         if best_overall:
             logger.debug(f"[OK] Selected BEST OVERALL candidate: '{best_overall[0]}' (score: {best_overall_score:,.0f})")
+            self._last_album = best_overall[1] if len(best_overall) > 1 else ""
+        else:
+            self._last_album = ""
         return best_overall[0] if best_overall else None
 
     def _score_candidate(self, artist_credit: str, release_name: str, score: float, track_clean: str, artist_hint: Optional[str] = None, album_hint: Optional[str] = None) -> float:

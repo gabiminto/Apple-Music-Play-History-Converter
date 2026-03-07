@@ -1,0 +1,20 @@
+{
+  "name": "apple-music-proxy-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "^6.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260208.0",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.4",
+    "wrangler": "^4.52.4"
+  }
+}
