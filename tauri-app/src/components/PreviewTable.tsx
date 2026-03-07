@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { getCsvPreview, setPreviewEdits } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { ChartBar, Spinner } from "@phosphor-icons/react";
@@ -38,7 +38,39 @@ export function PreviewTable({ filePath }: PreviewTableProps) {
     const [loadingSlow, setLoadingSlow] = useState(false);
     const [applying, setApplying] = useState(false);
     const [editedIndexes, setEditedIndexes] = useState<Set<number>>(new Set());
+    const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
+    const tableRef = useRef<HTMLTableElement>(null);
+    const resizingCol = useRef<number | null>(null);
+    const startX = useRef(0);
+    const startWidth = useRef(0);
     const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleResizeStart = useCallback((colIndex: number, e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resizingCol.current = colIndex;
+        startX.current = e.clientX;
+        const th = tableRef.current?.querySelectorAll("th")[colIndex];
+        startWidth.current = th?.offsetWidth ?? 150;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+
+        const handleMouseMove = (ev: MouseEvent) => {
+            if (resizingCol.current === null) return;
+            const delta = ev.clientX - startX.current;
+            const newWidth = Math.max(40, startWidth.current + delta);
+            setColumnWidths(prev => ({ ...prev, [resizingCol.current!]: newWidth }));
+        };
+        const handleMouseUp = () => {
+            resizingCol.current = null;
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            document.removeEventListener("mousemove", handleMouseMove);
+            document.removeEventListener("mouseup", handleMouseUp);
+        };
+        document.addEventListener("mousemove", handleMouseMove);
+        document.addEventListener("mouseup", handleMouseUp);
+    }, []);
 
     const clearLoadingTimer = () => {
         if (loadingTimerRef.current) {
@@ -54,6 +86,7 @@ export function PreviewTable({ filePath }: PreviewTableProps) {
             clearLoadingTimer();
             setRows([]);
             setEditedIndexes(new Set());
+            setColumnWidths({});
             setLoading(false);
             setLoadingSlow(false);
         }
@@ -167,22 +200,35 @@ export function PreviewTable({ filePath }: PreviewTableProps) {
                 <p className="text-xs text-muted-foreground">
                     Edit Artist/Track/Album values before search.
                 </p>
-                <button
-                    onClick={handleApplyEdits}
-                    disabled={editedIndexes.size === 0 || applying}
-                    className="px-3 py-1.5 text-xs font-semibold rounded-md bg-accent text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                    {applying ? "Applying..." : "Apply Edits for Search"}
-                </button>
+                {editedIndexes.size > 0 && (
+                    <button
+                        onClick={handleApplyEdits}
+                        disabled={applying}
+                        className="px-3 py-1.5 text-xs font-semibold rounded-md bg-accent text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {applying ? "Applying..." : `Apply Edits (${editedIndexes.size})`}
+                    </button>
+                )}
+
             </div>
 
             <div className="flex-1 overflow-auto">
-                <table className="w-full text-sm text-left">
-                    <thead className="text-xs text-muted-foreground uppercase bg-foreground-5 border-b border-border sticky top-0 z-10">
+                <table ref={tableRef} className="w-full text-sm text-left" style={{ tableLayout: Object.keys(columnWidths).length > 0 ? "fixed" : "auto" }}>
+                    <thead className="text-xs text-muted-foreground uppercase bg-background border-b border-border sticky top-0 z-10">
                         <tr>
                             {headers.map((header, i) => (
-                                <th key={i} className="px-4 py-2.5 font-medium whitespace-nowrap">
-                                    {header}
+                                <th
+                                    key={i}
+                                    className="px-4 py-2.5 font-medium whitespace-nowrap relative select-none group"
+                                    style={columnWidths[i] ? { width: columnWidths[i] } : undefined}
+                                >
+                                    <span className="truncate">{header}</span>
+                                    <div
+                                        className="absolute top-0 right-0 w-[5px] h-full cursor-col-resize opacity-0 hover:opacity-100 active:opacity-100 z-20"
+                                        onMouseDown={(e) => handleResizeStart(i, e)}
+                                    >
+                                        <div className="w-[2px] h-full mx-auto bg-accent/40" />
+                                    </div>
                                 </th>
                             ))}
                         </tr>

@@ -54,6 +54,7 @@ pub struct DatabaseStatus {
 
 pub struct AppState {
     pub sidecar: Mutex<SidecarManager>,
+    pub loaded_file: Mutex<Option<String>>,
 }
 
 /// Detect CSV file type from the first line (header row).
@@ -80,26 +81,37 @@ async fn analyze_csv(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<FileInfo, String> {
-    let path_buf = std::path::PathBuf::from(&path);
-    if !path_buf.exists() {
-        return Err(format!("File not found: {}", path));
-    }
+    let path_clone = path.clone();
 
-    let file_name = path_buf
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| path.clone());
-    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    // Run blocking file I/O on a separate thread to avoid stalling the async runtime.
+    // Large CSVs (100MB+) can take seconds to count lines — this would block Tauri IPC.
+    let (file_name, file_size, file_type, row_count) =
+        tokio::task::spawn_blocking(move || -> Result<(String, u64, String, usize), String> {
+            let path_buf = std::path::PathBuf::from(&path_clone);
+            if !path_buf.exists() {
+                return Err(format!("File not found: {}", path_clone));
+            }
 
-    // Read first line for file type detection + count rows
-    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    let reader = std::io::BufReader::new(file);
-    let mut lines = std::io::BufRead::lines(reader);
+            let name = path_buf
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| path_clone.clone());
+            let metadata = std::fs::metadata(&path_clone).map_err(|e| e.to_string())?;
 
-    let first_line = lines.next().unwrap_or(Ok(String::new())).unwrap_or_default();
-    let file_type = detect_file_type(&first_line).to_string();
-    let row_count = lines.count(); // remaining lines = data rows
+            let file = std::fs::File::open(&path_clone).map_err(|e| e.to_string())?;
+            let reader = std::io::BufReader::new(file);
+            let mut lines = std::io::BufRead::lines(reader);
+
+            let first_line = lines.next().unwrap_or(Ok(String::new())).unwrap_or_default();
+            let ftype = detect_file_type(&first_line).to_string();
+            let count = lines.count();
+
+            Ok((name, metadata.len(), ftype, count))
+        })
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        ?;
 
     // Also tell sidecar to analyze (it will emit a fileAnalysis event with more detail)
     if let Ok(mut sidecar) = state.sidecar.lock() {
@@ -112,7 +124,7 @@ async fn analyze_csv(
     Ok(FileInfo {
         path,
         name: file_name,
-        size: metadata.len(),
+        size: file_size,
         row_count,
         file_type,
         is_converted_csv: false,
@@ -129,13 +141,18 @@ async fn start_search(
 ) -> Result<(), String> {
     let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
 
-    // First load csv
-    sidecar.send(serde_json::json!({
-        "action": "loadCSV",
-        "path": file_path
-    }))?;
+    // Only reload CSV if the file changed
+    let mut loaded = state.loaded_file.lock().map_err(|_| "Failed to lock loaded_file")?;
+    let needs_load = loaded.as_deref() != Some(&file_path);
+    if needs_load {
+        sidecar.send(serde_json::json!({
+            "action": "loadCSV",
+            "path": file_path
+        }))?;
+        *loaded = Some(file_path);
+    }
 
-    // Then start search
+    // Start search
     sidecar.send(serde_json::json!({
         "action": "startSearch",
         "provider": provider
@@ -348,6 +365,13 @@ async fn check_musicbrainz_api_status(state: State<'_, AppState>) -> Result<(), 
 }
 
 #[tauri::command]
+async fn check_apple_music_api_status(state: State<'_, AppState>) -> Result<(), String> {
+    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
+    sidecar.send(serde_json::json!({ "action": "checkAppleMusicApiStatus" }))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn configure_apple_music(
     state: State<'_, AppState>,
     team_id: String,
@@ -382,14 +406,13 @@ async fn get_apple_music_status(state: State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
-#[tauri::command]
-async fn get_log_dir(_app: tauri::AppHandle) -> Result<String, String> {
-    // Keep logs under a stable app-specific directory per platform.
+fn resolve_log_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "Cannot determine home directory".to_string())?;
     let home = std::path::PathBuf::from(home);
 
+    // Must match Python's platformdirs paths (appname=AppleMusicConverter, appauthor=False)
     let log_dir = if cfg!(target_os = "macos") {
         home.join("Library").join("Logs").join("AppleMusicConverter")
     } else if cfg!(target_os = "windows") {
@@ -400,30 +423,19 @@ async fn get_log_dir(_app: tauri::AppHandle) -> Result<String, String> {
         home.join(".apple_music_converter").join("logs")
     };
 
-    // Create the directory if it doesn't exist
     std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log dir: {}", e))?;
+    Ok(log_dir)
+}
 
+#[tauri::command]
+async fn get_log_dir(_app: tauri::AppHandle) -> Result<String, String> {
+    let log_dir = resolve_log_dir()?;
     Ok(log_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 async fn open_log_dir() -> Result<(), String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "Cannot determine home directory".to_string())?;
-    let home = std::path::PathBuf::from(home);
-
-    let log_dir = if cfg!(target_os = "macos") {
-        home.join("Library").join("Logs").join("AppleMusicConverter")
-    } else if cfg!(target_os = "windows") {
-        let local = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| home.join("AppData").join("Local").to_string_lossy().to_string());
-        std::path::PathBuf::from(local).join("AppleMusicConverter").join("Logs")
-    } else {
-        home.join(".apple_music_converter").join("logs")
-    };
-
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log dir: {}", e))?;
+    let log_dir = resolve_log_dir()?;
 
     #[cfg(target_os = "macos")]
     {
@@ -600,6 +612,7 @@ pub fn run() {
     builder
         .manage(AppState {
             sidecar: Mutex::new(SidecarManager::new()),
+            loaded_file: Mutex::new(None),
         })
         .setup(|app| {
             let window = app
@@ -646,6 +659,7 @@ pub fn run() {
             import_database,
             check_itunes_status,
             check_musicbrainz_api_status,
+            check_apple_music_api_status,
             configure_apple_music,
             test_apple_music_credentials,
             get_apple_music_status,

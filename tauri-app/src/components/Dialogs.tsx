@@ -49,15 +49,27 @@ export function Dialogs({ showHowTo, onCloseHowTo, showAbout, onCloseAbout, conf
           <section>
             <h3 className="font-semibold mb-2">Step 3: Choose Search Provider</h3>
             <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
-              <li><strong>MusicBrainz API</strong> - Free, fast, no rate limits (recommended)</li>
-              <li><strong>iTunes API</strong> - Fallback option, 20 requests/minute limit</li>
-              <li><strong>Apple Music API</strong> - Requires credentials, ISRC support</li>
+              <li><strong>MusicBrainz API</strong> - Free, 1 request/second (good for most use cases)</li>
+              <li><strong>MusicBrainz Local DB</strong> - Fastest, requires ~2GB database download</li>
+              <li><strong>iTunes API</strong> - Good for Apple Music tracks, rate limited</li>
+              <li><strong>Apple Music API</strong> - Best accuracy for Apple Music libraries, uses a 3-phase search</li>
             </ul>
           </section>
 
           <section>
             <h3 className="font-semibold mb-2">Step 4: Start Search</h3>
             <p className="text-muted-foreground">Click "Search" and wait for the app to match your tracks. You can pause/resume or stop anytime.</p>
+          </section>
+
+          <section>
+            <h3 className="font-semibold mb-2">Understanding Apple Music Search Phases</h3>
+            <p className="text-muted-foreground mb-2">When using the Apple Music API, the search runs in 3 phases for best accuracy:</p>
+            <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+              <li><strong>Phase 1 — Album Lookup:</strong> Fetches album metadata using container IDs from your CSV. Some albums may show as "unavailable" — this is normal. Albums get removed, region-restricted, or re-issued under new IDs over time.</li>
+              <li><strong>Phase 2 — ISRC Matching:</strong> Matches tracks by their ISRC code (a unique recording identifier). Very accurate when available.</li>
+              <li><strong>Phase 3 — Name Search:</strong> Searches by artist and track name for any remaining unmatched tracks.</li>
+            </ul>
+            <p className="text-muted-foreground mt-2">Tracks from unavailable albums are not lost — they are automatically matched in Phase 2 or 3.</p>
           </section>
 
           <section>
@@ -68,6 +80,19 @@ export function Dialogs({ showHowTo, onCloseHowTo, showAbout, onCloseAbout, conf
               <li><strong>ListenBrainz JSON</strong> - For ListenBrainz.org</li>
               <li><strong>Spotify CSV</strong> - For third-party Spotify importers</li>
               <li><strong>Universal CSV</strong> - All original fields preserved</li>
+            </ul>
+          </section>
+
+          <section>
+            <h3 className="font-semibold mb-2">Saving Progress &amp; Resuming Later</h3>
+            <p className="text-muted-foreground mb-2">
+              Large libraries can take hours to search. You don't have to finish in one session:
+            </p>
+            <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+              <li>You can <strong>pause, stop, or quit</strong> at any time without losing progress.</li>
+              <li>After stopping, click <strong>"Save Progress"</strong> to export a file with your results so far.</li>
+              <li>To continue later, just <strong>open that saved file</strong> in the app. It will detect your previous results and offer to search only the missing tracks.</li>
+              <li>You can also switch to a different search provider when resuming — for example, start with Apple Music API and retry missing tracks with MusicBrainz.</li>
             </ul>
           </section>
         </div>

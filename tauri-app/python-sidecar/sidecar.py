@@ -497,11 +497,13 @@ class SidecarHandler:
     # ------------------------------------------------------------------
     def send_message(self, msg: Dict[str, Any]):
         """Send JSON message to stdout for Tauri to receive."""
+        import sys as _sys
         try:
-            print(json.dumps(msg, default=str), flush=True)
-        except Exception:
-            # Last resort - don't crash the sidecar
-            pass
+            line = json.dumps(msg, default=str)
+            print(line, flush=True)
+        except Exception as e:
+            _sys.stderr.write(f"[SIDECAR] send_message failed: {e}\n")
+            _sys.stderr.flush()
 
     def send_error(self, error: str, context: str = ""):
         """Send error message."""
@@ -773,7 +775,7 @@ class SidecarHandler:
             "elapsedSeconds": float(state.get("elapsed_seconds", 0.0)),
         })
 
-    async def _batch_lookup_apple_music_isrc(self, tracks: List[Dict]) -> Dict[str, Dict[str, str]]:
+    async def _batch_lookup_apple_music_isrc(self, tracks: List[Dict], start_time: float = 0, total_tracks: int = 0) -> Dict[str, Dict[str, str]]:
         """Prefetch Apple Music matches for ISRC codes in batches (max 25/request)."""
         if not tracks or not self.music_service:
             return {}
@@ -801,6 +803,8 @@ class SidecarHandler:
         total_batches = (len(isrc_codes) + 24) // 25
 
         for batch_idx in range(total_batches):
+            if self.stop_search_flag:
+                break
             chunk = isrc_codes[batch_idx * 25:(batch_idx + 1) * 25]
             try:
                 await self._rate_limiter.acquire()
@@ -820,6 +824,17 @@ class SidecarHandler:
                     "track": attrs.get("name", ""),
                 }
 
+            phase2_msg = f"Phase 2/3: ISRC batch {batch_idx + 1}/{total_batches} ({len(matches)} matched)"
+            self.send_status(phase2_msg)
+            self.send_progress(
+                current=0, total=total_tracks or total_batches,
+                found=0, missing=0, provider="apple_music",
+                status=phase2_msg,
+                elapsed_seconds=time.time() - start_time if start_time else 0,
+                estimated_remaining_seconds=(total_batches - batch_idx - 1) * self._rate_limiter._interval,
+                rate_limited=0,
+            )
+
         if matches:
             self.send_log(
                 f"ISRC batch lookup matched {len(matches)} of {len(isrc_codes)} unique codes",
@@ -830,6 +845,8 @@ class SidecarHandler:
     async def _batch_lookup_albums_by_container_id(
         self,
         tracks: List[Dict],
+        start_time: float = 0,
+        total_tracks: int = 0,
     ) -> Dict[str, Dict[str, Any]]:
         """Prefetch album data for tracks that have Apple Music Container IDs.
 
@@ -881,8 +898,9 @@ class SidecarHandler:
         album_cache: Dict[str, Dict[str, Any]] = {}
         fetched = 0
         failed = 0
+        total_albums = len(album_ids)
 
-        for container_id, storefront in album_ids.items():
+        for album_idx, (container_id, storefront) in enumerate(album_ids.items()):
             if self.stop_search_flag:
                 break
             try:
@@ -922,13 +940,34 @@ class SidecarHandler:
                 fetched += 1
             except Exception as e:
                 failed += 1
-                self.send_log(f"Album lookup failed for {container_id}: {e}", "warning")
+                err_str = str(e)
+                if "404" in err_str:
+                    self.send_log(f"Album {container_id} no longer available on Apple Music (removed or region-restricted)", "info")
+                else:
+                    self.send_log(f"Album lookup failed for {container_id}: {e}", "warning")
+
+            phase1_msg = f"Phase 1/3: Album {album_idx + 1}/{total_albums} ({fetched} fetched, {failed} unavailable)"
+            self.send_status(phase1_msg)
+            self.send_progress(
+                current=0, total=total_tracks or total_albums,
+                found=0, missing=0, provider="apple_music",
+                status=phase1_msg,
+                elapsed_seconds=time.time() - start_time if start_time else 0,
+                estimated_remaining_seconds=(total_albums - album_idx - 1) * self._rate_limiter._interval,
+                rate_limited=0,
+            )
 
         self.send_log(
-            f"Album lookup complete: {fetched} fetched, {failed} failed, "
-            f"{sum(len(a['tracks']) for a in album_cache.values())} total album tracks cached",
+            f"Album lookup complete: {fetched} fetched, {failed} unavailable, "
+            f"{sum(len(a['tracks']) for a in album_cache.values())} album tracks cached",
             "info",
         )
+        if failed > 0:
+            self.send_log(
+                f"{failed} albums were unavailable (removed or region-restricted). "
+                f"Those tracks will be matched by ISRC or name search instead.",
+                "info",
+            )
         return album_cache
 
     @staticmethod
@@ -1014,7 +1053,6 @@ class SidecarHandler:
             self.music_service.rate_limit_wait_callback = self._on_rate_limit_wait
             self.music_service.rate_limit_hit_callback = self._on_rate_limit_hit
             self.send_message({"type": "initialized", "success": True})
-            self.send_log("Music search service initialized", "info")
         except Exception as e:
             self.send_error(str(e), "initialize_service")
 
@@ -1587,10 +1625,14 @@ class SidecarHandler:
         if not self.music_service:
             return {"success": False, "error": "Music service unavailable"}
 
-        # Pre-emptive throttle for API-based providers
+        # Pre-emptive throttle for Apple Music API only (iTunes and MusicBrainz have their own rate limiters)
         provider = self.music_service.get_search_provider() if hasattr(self.music_service, 'get_search_provider') else ""
-        if provider in ("apple_music", "itunes", "musicbrainz_api"):
+        if provider == "apple_music":
             await self._rate_limiter.acquire()
+
+        # Local DB needs a longer timeout (cold start, large queries)
+        if provider == "musicbrainz":
+            timeout_seconds = max(timeout_seconds, 60.0)
 
         # Temporarily override storefront if provided per-track
         original_storefront = None
@@ -1768,7 +1810,18 @@ class SidecarHandler:
                     )
                 )
             except Exception as e:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
                 self.send_error(str(e), "search_worker")
+                # Ensure the UI resets if the search thread crashes
+                self.send_message({
+                    "type": "searchStopped",
+                    "success": False,
+                    "current": 0,
+                    "total": len(tracks_for_run),
+                    "found": 0,
+                    "missing": 0,
+                })
             finally:
                 loop.close()
 
@@ -1852,7 +1905,15 @@ class SidecarHandler:
                 })
                 self.send_status("Phase 1/3: Looking up album metadata...")
                 self.send_log(f"Found {album_ids_count} unique albums to look up")
-                album_cache = await self._batch_lookup_albums_by_container_id(tracks_for_run[start_index:])
+                self.send_progress(
+                    current=0, total=total, found=0, missing=0,
+                    provider=provider,
+                    status=f"Phase 1/3: Looking up {album_ids_count} albums...",
+                    elapsed_seconds=time.time() - start_time,
+                    estimated_remaining_seconds=album_ids_count * self._rate_limiter._interval,
+                    rate_limited=0,
+                )
+                album_cache = await self._batch_lookup_albums_by_container_id(tracks_for_run[start_index:], start_time=start_time, total_tracks=total)
 
             # Phase 2: ISRC batch lookups (for tracks without container match)
             has_isrc_candidates = any(
@@ -1867,12 +1928,26 @@ class SidecarHandler:
                 })
                 self.send_status("Phase 2/3: Batch matching ISRCs...")
                 self.send_log(f"Matching {isrc_count} unique ISRC codes")
-                isrc_batch_matches = await self._batch_lookup_apple_music_isrc(tracks_for_run[start_index:])
+                # Send a progress event so the main UI shows activity
+                self.send_progress(
+                    current=0, total=total, found=0, missing=0,
+                    provider=provider,
+                    status=f"Phase 2/3: Matching {isrc_count} ISRCs...",
+                    elapsed_seconds=time.time() - start_time,
+                    estimated_remaining_seconds=(isrc_count // 25) * self._rate_limiter._interval,
+                    rate_limited=0,
+                )
+                isrc_batch_matches = await self._batch_lookup_apple_music_isrc(tracks_for_run[start_index:], start_time=start_time, total_tracks=total)
                 skip_single_isrc_lookup = True
 
         # Phase 3: Per-track search
         if provider == "apple_music":
             self.send_status("Phase 3/3: Searching individual tracks...")
+
+        # Throttle progress events: send at most every 100 tracks or 0.5s
+        _PROGRESS_THROTTLE_TRACKS = 100
+        _PROGRESS_THROTTLE_SECS = 0.5
+        _last_progress_time = 0.0
 
         for i in range(start_index, total):
             track = tracks_for_run[i]
@@ -1932,24 +2007,44 @@ class SidecarHandler:
             else:
                 remaining = 0
 
-            self.send_progress(
-                current=i + 1,
-                total=total,
-                found=found,
-                missing=missing,
-                provider=provider,
-                status="Searching...",
-                current_track=track_display,
-                elapsed_seconds=elapsed,
-                estimated_remaining_seconds=remaining,
-                rate_limited=rate_limited,
+            # Throttle progress events to avoid flooding the UI
+            now = time.time()
+            should_send_progress = (
+                i == start_index  # first track
+                or (i + 1) == total  # last track
+                or (i - start_index) % _PROGRESS_THROTTLE_TRACKS == 0
+                or (now - _last_progress_time) >= _PROGRESS_THROTTLE_SECS
             )
+            if should_send_progress:
+                _last_progress_time = now
+                self.send_progress(
+                    current=i + 1,
+                    total=total,
+                    found=found,
+                    missing=missing,
+                    provider=provider,
+                    status="Searching...",
+                    current_track=track_display,
+                    elapsed_seconds=elapsed,
+                    estimated_remaining_seconds=remaining,
+                    rate_limited=rate_limited,
+                )
 
             # Skip tracks with no useful data
             if not title and not artist:
                 missing += 1
                 track["_found"] = False
                 track["_error"] = "No track or artist data"
+                self.send_message({
+                    "type": "trackResult",
+                    "index": output_index,
+                    "artist": track.get("artist", ""),
+                    "track": track.get("track", ""),
+                    "album": track.get("album", ""),
+                    "found": False,
+                    "rateLimited": False,
+                    "source": "",
+                })
                 if persist_progress and (((i + 1) % self.PROGRESS_SAVE_INTERVAL) == 0 or i == total - 1):
                     self._save_progress(
                         provider=provider,
@@ -1960,6 +2055,9 @@ class SidecarHandler:
                         rate_limited=rate_limited,
                         elapsed_seconds=elapsed,
                     )
+                # Yield every 200 skipped tracks to prevent event flooding
+                if missing % 200 == 0:
+                    await asyncio.sleep(0)
                 continue
 
             # Container ID album match (Apple Music provider, Play Activity CSVs)
@@ -2008,6 +2106,9 @@ class SidecarHandler:
                                 rate_limited=rate_limited,
                                 elapsed_seconds=elapsed,
                             )
+                        # Yield every 50 cached matches to prevent event flooding
+                        if found % 50 == 0:
+                            await asyncio.sleep(0)
                         continue
 
             # Batch-primed ISRC match (Apple Music provider)
@@ -2613,6 +2714,19 @@ class SidecarHandler:
             context="check_musicbrainz_api_status",
         )
 
+    def check_apple_music_api_status(self):
+        """Check Apple Music API availability via the proxy."""
+        proxy_url = self._resolve_proxy_url()
+        if not proxy_url:
+            self.send_status("Apple Music API: Not configured")
+            return
+        self._probe_api_status(
+            label="Apple Music API",
+            url=f"{proxy_url.rstrip('/')}/health",
+            rate_limited_codes={429},
+            context="check_apple_music_api_status",
+        )
+
     def _probe_api_status(
         self,
         label: str,
@@ -2777,6 +2891,9 @@ class SidecarHandler:
 
             elif action == "checkMusicBrainzApiStatus":
                 self.check_musicbrainz_api_status()
+
+            elif action == "checkAppleMusicApiStatus":
+                self.check_apple_music_api_status()
 
             elif action == "configureAppleMusic":
                 self.configure_apple_music(

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { SearchProgress, LogEntry } from "../lib/types";
 
@@ -7,6 +7,9 @@ export function useSearch(isTauri: boolean) {
     const [isSearching, setIsSearching] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
     const [logs, setLogs] = useState<LogEntry[]>([]);
+    // Track the last sidecar-reported elapsed so the local timer stays in sync
+    const lastSidecarElapsed = useRef<number>(0);
+    const localTickOffset = useRef<number>(0);
 
     const addLog = useCallback((type: LogEntry["type"], message: string) => {
         setLogs(prev => [
@@ -14,6 +17,22 @@ export function useSearch(isTauri: boolean) {
             { type, message, timestamp: new Date() }
         ]);
     }, []);
+
+    // 1-second interval to tick elapsed while searching
+    useEffect(() => {
+        if (!isSearching || isPaused) {
+            localTickOffset.current = 0;
+            return;
+        }
+        const id = setInterval(() => {
+            localTickOffset.current += 1;
+            setProgress(prev => {
+                if (!prev) return prev;
+                return { ...prev, elapsedSeconds: lastSidecarElapsed.current + localTickOffset.current };
+            });
+        }, 1000);
+        return () => clearInterval(id);
+    }, [isSearching, isPaused]);
 
     useEffect(() => {
         if (!isTauri) return;
@@ -23,7 +42,14 @@ export function useSearch(isTauri: boolean) {
         // Search progress
         unlisteners.push(
             listen<SearchProgress>("search_progress", (event) => {
+                // Sync the sidecar's authoritative elapsed and reset local offset
+                lastSidecarElapsed.current = event.payload.elapsedSeconds ?? 0;
+                localTickOffset.current = 0;
                 setProgress(event.payload);
+                // Also add to log so it's visible in the log panel
+                if (event.payload?.status && event.payload.status !== "Complete") {
+                    addLog("info", `[Progress] ${event.payload.status} (${event.payload.current}/${event.payload.total})`);
+                }
                 if (event.payload.status === "Complete") {
                     setIsSearching(false);
                     setIsPaused(false);
@@ -58,10 +84,12 @@ export function useSearch(isTauri: boolean) {
             })
         );
 
-        // Status messages (from sidecar)
+        // Status messages (from sidecar) — skip API status checks (shown as badges)
         unlisteners.push(
             listen<{ status: string }>("sidecar_status", (event) => {
-                addLog("info", event.payload.status);
+                const s = event.payload.status;
+                if (s.startsWith("iTunes API:") || s.startsWith("MusicBrainz API:") || s.startsWith("Apple Music API:")) return;
+                addLog("info", s);
             })
         );
 

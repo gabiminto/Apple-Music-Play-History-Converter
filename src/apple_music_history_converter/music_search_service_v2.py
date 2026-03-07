@@ -114,6 +114,7 @@ class MusicSearchServiceV2:
             "search_provider": "musicbrainz",  # Default to local MusicBrainz database
             "auto_fallback": True,
             "itunes_rate_limit": 20,  # Fixed requests per minute for iTunes API
+            "musicbrainz_api_rate_limit": 1,  # Requests per second for MusicBrainz API (policy: max 1)
             "cache_search_results": True,  # Cache duplicate track lookups (saves API calls)
             "apple_music_enabled": True
         }
@@ -387,6 +388,7 @@ class MusicSearchServiceV2:
                 return {
                     "success": True,
                     "artist": cached['mb_artist_credit_name'],
+                    "album": cached.get('mb_album', ''),
                     "source": "cached",
                     "confidence": cached.get('confidence', 'high')
                 }
@@ -427,8 +429,10 @@ class MusicSearchServiceV2:
                         "error": "MusicBrainz not available and fallback disabled"
                     }
 
-            # Search MusicBrainz
-            result = self._search_musicbrainz(song_name, artist_name, album_name)
+            # Search MusicBrainz (sync/blocking — run in thread to avoid blocking event loop)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._search_musicbrainz, song_name, artist_name, album_name
+            )
             if result["success"]:
                 if TRACE_ENABLED:
                     trace_log.debug("MusicBrainz success for %s -> %s", song_name, result.get("artist"))
@@ -582,6 +586,7 @@ class MusicSearchServiceV2:
                 return {
                     "success": True,
                     "artist": artist_result,
+                    "album": getattr(self.musicbrainz_manager, '_last_album', ''),
                     "source": "musicbrainz"
                 }
             else:
@@ -881,9 +886,10 @@ class MusicSearchServiceV2:
                 self._debug_log(f"   [=] Found {len(results)} results")
 
                 if results:
-                    # Return first result's artist
+                    # Return first result's artist and album
                     artist = results[0].get('artistName', '')
-                    self._debug_log(f"   [OK] iTunes found artist: '{artist}'")
+                    album = results[0].get('collectionName', '')
+                    self._debug_log(f"   [OK] iTunes found artist: '{artist}', album: '{album}'")
                     logger.info(f"iTunes found: '{artist}' for '{song_name}'")
                     if TRACE_ENABLED:
                         trace_log.debug("iTunes success for %s -> %s", song_name, artist)
@@ -891,6 +897,7 @@ class MusicSearchServiceV2:
                     result = {
                         "success": True,
                         "artist": artist,
+                        "album": album,
                         "source": "itunes"
                     }
 
@@ -1380,15 +1387,17 @@ class MusicSearchServiceV2:
                 "limit": 10  # Get top 10 results
             }
 
-            # Rate limiting: 1 request per second
+            # Rate limiting: default 1 request per second (MusicBrainz policy)
+            mb_rate = max(1, int(self.settings.get("musicbrainz_api_rate_limit", 1)))
+            mb_interval = 1.0 / mb_rate
             with self.musicbrainz_api_lock:  # Dedicated lock for MusicBrainz API (independent from iTunes)
                 current_time = time.time()
 
-                # Check if we need to wait (1 second between requests)
+                # Check if we need to wait
                 if hasattr(self, '_mb_api_last_request'):
                     time_since_last = current_time - self._mb_api_last_request
-                    if time_since_last < 1.0:
-                        wait_time = 1.0 - time_since_last
+                    if time_since_last < mb_interval:
+                        wait_time = mb_interval - time_since_last
                         logger.debug(f"[||]  MusicBrainz API rate limit: waiting {wait_time:.2f}s")
 
                         # Use Event.wait() for interruptible sleep (prevents GIL crash)
@@ -1440,18 +1449,22 @@ class MusicSearchServiceV2:
                                 "error": "No match found"
                             }
                         
-                        # Get artist from first result
+                        # Get artist and album from first result
                         first_recording = recordings[0]
                         artist_credits = first_recording.get("artist-credit", [])
-                        
+
                         if artist_credits:
                             artist_name = artist_credits[0].get("name", "Unknown Artist")
+                            # Get album from first release if available
+                            releases = first_recording.get("releases", [])
+                            album_name = releases[0].get("title", "") if releases else ""
                             elapsed = (time.time() - search_start) * 1000
                             logger.debug(f"   [OK] MusicBrainz API SUCCESS: Found '{artist_name}' for '{song_name}' in {elapsed:.1f}ms")
 
                             result = {
                                 "success": True,
                                 "artist": artist_name,
+                                "album": album_name,
                                 "source": "musicbrainz_api"
                             }
 

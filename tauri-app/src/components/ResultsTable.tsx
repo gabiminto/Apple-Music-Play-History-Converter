@@ -23,7 +23,8 @@ type SortDirection = "asc" | "desc" | null;
 const COLUMNS = ["", "Artist", "Track", "Album", "Source"];
 
 export function ResultsTable({ progress, isSearching, filePath }: ResultsTableProps) {
-    const [results, setResults] = useState<TrackResult[]>([]);
+    const [results, setResults] = useState<Map<number, TrackResult>>(new Map());
+    const [totalRowCount, setTotalRowCount] = useState(0);
     const [filter, setFilter] = useState<"all" | "found" | "missing" | "rate_limited">("all");
     const [searchQuery, setSearchQuery] = useState("");
     const [sortCol, setSortCol] = useState<number | null>(null);
@@ -36,7 +37,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
     const pendingTrackUpdates = useRef<Map<number, TrackResult>>(new Map());
     const flushRafRef = useRef<number | null>(null);
 
-    // Listen for individual track results from sidecar
+    // Listen for individual track results from sidecar - uses Map for O(1) updates
     useEffect(() => {
         const unlisteners: Promise<() => void>[] = [];
         const flushPending = () => {
@@ -47,11 +48,11 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
             const updates = pendingTrackUpdates.current;
             pendingTrackUpdates.current = new Map();
             setResults((prev) => {
-                const updated = [...prev];
+                const next = new Map(prev);
                 updates.forEach((value, index) => {
-                    updated[index] = value;
+                    next.set(index, value);
                 });
-                return updated;
+                return next;
             });
         };
 
@@ -81,16 +82,11 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
             })
         );
 
-        // CSV loaded - initialize empty result slots
+        // CSV loaded - just track the row count, don't create huge arrays
         unlisteners.push(
             listen<{ rowCount: number }>("csv_loaded", (event) => {
-                setResults(new Array(event.payload.rowCount).fill(null).map(() => ({
-                    artist: "",
-                    track: "",
-                    album: "",
-                    status: "pending" as const,
-                    source: "",
-                })));
+                setTotalRowCount(event.payload.rowCount);
+                setResults(new Map());
             })
         );
 
@@ -106,7 +102,8 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
 
     useEffect(() => {
         if (!filePath) {
-            setResults([]);
+            setResults(new Map());
+            setTotalRowCount(0);
             setSearchQuery("");
             setFilter("all");
             setSortCol(null);
@@ -157,15 +154,18 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
     }, [sortCol, sortDir]);
 
     // If no progress or search hasn't started, show nothing
-    if (!progress && !isSearching && results.length === 0) {
+    if (!progress && !isSearching && results.size === 0 && totalRowCount === 0) {
         return null;
     }
 
+    // Convert Map to array for display — only the entries we actually have
+    const resultsArray = Array.from(results.values());
+
     const counts = {
-        all: results.length,
-        found: results.filter(r => r.status === "found").length,
-        missing: results.filter(r => r.status === "missing").length,
-        rate_limited: results.filter(r => r.status === "rate_limited").length,
+        all: totalRowCount,
+        found: resultsArray.filter(r => r.status === "found").length,
+        missing: resultsArray.filter(r => r.status === "missing").length,
+        rate_limited: resultsArray.filter(r => r.status === "rate_limited").length,
     };
 
     // Filter by status, then by search, then sort
@@ -179,7 +179,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
         }
     };
 
-    let filtered = filter === "all" ? results : results.filter(r => r.status === filter);
+    let filtered = filter === "all" ? resultsArray : resultsArray.filter(r => r.status === filter);
 
     if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
@@ -199,6 +199,11 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
             return sortDir === "asc" ? cmp : -cmp;
         });
     }
+
+    // Cap rendered rows to avoid freezing the browser with large datasets
+    const MAX_VISIBLE_ROWS = 500;
+    const totalFiltered = filtered.length;
+    const visibleRows = totalFiltered > MAX_VISIBLE_ROWS ? filtered.slice(0, MAX_VISIBLE_ROWS) : filtered;
 
     const statusIcon = (status: TrackResult["status"]) => {
         switch (status) {
@@ -231,7 +236,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                         >
                             {f === "all" ? "All" : f === "found" ? "Found" : f === "missing" ? "Missing" : "Rate-Limited"}
                             {" "}
-                            <span className="font-bold">{counts[f]}</span>
+                            <span className="font-bold">{counts[f].toLocaleString()}</span>
                         </button>
                     ))}
                 </div>
@@ -256,7 +261,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                 </div>
                 {searchQuery && (
                     <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
-                        {filtered.length}/{counts[filter]}
+                        {totalFiltered}/{counts[filter]}
                     </span>
                 )}
 
@@ -264,7 +269,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                 {counts.found > 0 && (
                     <button
                         onClick={async () => {
-                            const found = results.filter(r => r.status === "found");
+                            const found = resultsArray.filter(r => r.status === "found");
                             const csv = ["Artist,Track,Album,Source",
                                 ...found.map(r =>
                                     [r.artist, r.track, r.album, r.source]
@@ -293,10 +298,12 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
 
             {/* Table */}
             <div className="flex-1 overflow-auto bg-background">
-                {filtered.length === 0 ? (
+                {totalFiltered === 0 ? (
                     <div className="p-8 text-center text-muted-foreground text-sm">
-                        {results.length === 0
-                            ? "Results will appear here after search starts"
+                        {results.size === 0
+                            ? (totalRowCount > 0
+                                ? `Searching ${totalRowCount.toLocaleString()} tracks...`
+                                : "Results will appear here after search starts")
                             : searchQuery
                                 ? `No matches for "${searchQuery}"`
                                 : `No ${filter} tracks`
@@ -304,7 +311,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                     </div>
                 ) : (
                     <table ref={tableRef} className="w-full text-sm" style={{ tableLayout: Object.keys(columnWidths).length > 0 ? "fixed" : "auto" }}>
-                        <thead className="sticky top-0 bg-foreground-5/50 z-10">
+                        <thead className="sticky top-0 bg-background z-10 border-b border-border">
                             <tr>
                                 {COLUMNS.map((header, i) => (
                                     <th
@@ -342,7 +349,7 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                             </tr>
                         </thead>
                         <tbody>
-                            {filtered.map((r, i) => (
+                            {visibleRows.map((r, i) => (
                                 <tr key={i} className="border-t border-border/30 hover:bg-foreground-5/30">
                                     <td className="px-2 py-1">{statusIcon(r.status)}</td>
                                     <td className="px-2 py-1 truncate" title={r.artist}>{r.artist || "-"}</td>
@@ -353,6 +360,11 @@ export function ResultsTable({ progress, isSearching, filePath }: ResultsTablePr
                             ))}
                         </tbody>
                     </table>
+                )}
+                {totalFiltered > MAX_VISIBLE_ROWS && (
+                    <div className="p-2 text-center text-xs text-muted-foreground bg-foreground-5/30 border-t border-border">
+                        Showing {MAX_VISIBLE_ROWS.toLocaleString()} of {totalFiltered.toLocaleString()} rows. Use filters or search to narrow results.
+                    </div>
                 )}
             </div>
         </div>

@@ -136,6 +136,10 @@ export async function checkMusicBrainzApiStatus(): Promise<void> {
     return await invoke("check_musicbrainz_api_status");
 }
 
+export async function checkAppleMusicApiStatus(): Promise<void> {
+    return await invoke("check_apple_music_api_status");
+}
+
 // --- Apple Music API ---
 
 export async function configureAppleMusic(

@@ -2,8 +2,62 @@
 
 ## 3.0.0
 
-- Consolidated the project to a Tauri-only desktop architecture.
-- Removed legacy non-Tauri UI/runtime code and old build/test paths.
-- Kept shared Python backend modules used by the Tauri sidecar.
-- Standardized Python dependencies for sidecar/shared runtime.
-- Updated project docs and setup instructions to Tauri-first workflows.
+Complete rewrite as a native desktop app using Tauri, replacing the legacy Python/Toga UI.
+
+### New
+
+- Native desktop app built with Tauri + React + TypeScript + Rust
+- Modern UI with dark/light mode, resizable columns, and drag-and-drop CSV loading
+- Apple Music API search provider via Cloudflare Workers proxy
+- Album data matching across all search providers (iTunes, MusicBrainz API, MusicBrainz Local DB, Apple Music API)
+- Real-time search progress with elapsed time, ETA, and found/missing counters
+- Editable preview table — fix artist/track/album before searching
+- Resume support — pick up where you left off after stopping
+- Retry workflows for missing and rate-limited tracks
+- Export to Last.fm CSV, Spotify CSV, Universal CSV, iTunes XML, and ListenBrainz JSON
+- Per-provider rate limit controls with pause/resume
+- MusicBrainz local database management (download, import, optimize)
+- API health status badges on each search provider
+- Click-outside-to-close dialogs
+- Missing/rate-limited track detail dialogs
+- Log panel with real-time search activity
+
+### Fixed
+
+- ETA display now shows h:mm:ss format instead of raw seconds
+- Missing Tracks dialog now shows actual track data (not just a count)
+- Search Again no longer re-normalizes the CSV if the same file is loaded
+- Table headers are opaque (no bleed-through on scroll)
+- Eliminated double-throttling for iTunes and MusicBrainz API providers
+- MusicBrainz API rate limit setting now actually applies (was hardcoded)
+- Apple Music API badge shows its own status instead of sharing iTunes status
+- Duplicate startup notifications eliminated (React StrictMode guard)
+- API status messages suppressed from log panel (badges already show them)
+
+### Removed
+
+- Legacy Python/Toga desktop app
+- Old build system (build.py, DMG packaging)
+- Wiki documentation (replaced by in-app help)
+
+## 2.0.4
+
+- Thread safety fixes for Intel Mac compatibility
+
+## 2.0.3
+
+- Fuzzy matching algorithm improvements
+- Apostrophe mismatch fix for artist matching
+
+## 2.0.2
+
+- MusicBrainz local database support
+- Batch search optimization
+
+## 2.0.1
+
+- Bug fixes and stability improvements
+
+## 2.0.0
+
+- Initial public release with Toga UI

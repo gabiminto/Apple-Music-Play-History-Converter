@@ -1,40 +1,58 @@
 # Apple Music Play History Converter
 
-Desktop app for converting Apple Music CSV exports into multiple output formats, built with Tauri + React + TypeScript + Rust, with a Python sidecar for matching/search/export logic.
+Convert your Apple Music play history CSV exports into formats compatible with Last.fm, Spotify, ListenBrainz, and more.
 
-## Current Stack
+![Screenshot](docs/screenshot.jpg)
 
-- Frontend: Tauri + React + Vite
-- Backend host: Rust (`tauri-app/src-tauri`)
-- Search/export engine: Python sidecar (`tauri-app/python-sidecar/sidecar.py`)
-- Shared Python modules: `src/apple_music_history_converter`
+## Download
+
+Download the latest release for your platform from the [Releases](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases) page:
+
+- **macOS** — `.dmg` (signed and notarized)
+- **Windows** — `.msi` installer or `.exe` (NSIS)
 
 ## Features
 
-- Apple Music CSV analysis and preview
-- Search providers:
-  - MusicBrainz local database
-  - MusicBrainz API
+- **Load any Apple Music CSV export** — Play Activity, Recently Played Tracks, or Play History Daily Tracks
+- **Preview and edit** before searching — fix artist/track/album names inline with resizable columns
+- **4 search providers** with real-time status badges:
   - iTunes API
-  - Apple Music API (credentials or shared proxy)
-- Export formats:
-  - Last.fm CSV
-  - ListenBrainz JSON
-  - Spotify CSV
-  - Universal CSV
-  - iTunes XML
-- Retry for missing/rate-limited tracks
-- Resume support and settings persistence
+  - MusicBrainz API
+  - MusicBrainz Local Database (offline, fastest)
+  - Apple Music API (via shared proxy)
+- **5 export formats**: Last.fm CSV, Spotify CSV, Universal CSV, iTunes XML, ListenBrainz JSON
+- **Smart rate limiting** — per-provider controls, pause/resume, skip wait
+- **Resume support** — stop and pick up where you left off
+- **Retry workflows** — re-search missing or rate-limited tracks with any provider
+- **Album matching** — all providers return album data when available
+- Dark and light mode
 
-## Development
+## How to Get Your Apple Music Data
+
+1. Go to [privacy.apple.com](https://privacy.apple.com)
+2. Sign in and select **Request a copy of your data**
+3. Select **Apple Media Services information** (this includes Apple Music)
+4. Choose your preferred file size and submit
+5. Wait for Apple to prepare your data (usually 1-7 days)
+6. Download and unzip — look for CSV files like `Apple Music - Play History Daily Tracks.csv`
+
+## Usage
+
+1. Open the app and load your CSV file (drag and drop or click to browse)
+2. Preview your tracks — edit any incorrect entries
+3. Choose a search provider from the sidebar
+4. Click **Search** and watch progress in real-time
+5. Export your results in your preferred format
+
+## Building from Source
 
 ### Prerequisites
 
 - Node.js 20+
-- Rust toolchain
+- Rust toolchain (via [rustup](https://rustup.rs))
 - Python 3.8+
 
-### Install dependencies
+### Setup
 
 ```bash
 cd tauri-app
@@ -46,26 +64,46 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Run app
+### Run in development
 
 ```bash
 cd tauri-app
 npm run tauri dev
 ```
 
-## Verification
+### Build for production
 
 ```bash
+cd tauri-app
+npm run tauri build
+```
+
+The built app will be in `tauri-app/src-tauri/target/release/bundle/`.
+
+## Testing
+
+```bash
+# Frontend tests
 cd tauri-app && npm run test
+
+# Rust compilation check
 cd tauri-app/src-tauri && cargo check
+
+# Python sidecar tests
 cd tauri-app/python-sidecar && python3 test_sidecar.py
-cd tauri-app/python-sidecar && python3 test_retry_rate_limited.py
 ```
 
 ## Project Layout
 
-- `tauri-app/`: Tauri application (frontend + Rust backend)
-- `tauri-app/python-sidecar/`: Sidecar runtime and sidecar tests
-- `src/apple_music_history_converter/`: Shared Python backend modules used by sidecar
-- `_test_csvs/`: Test CSV fixtures
-- `cloudflare-worker/apple-music-proxy/`: Shared Apple Music proxy worker
+```
+tauri-app/                          Tauri application
+  src/                              React + TypeScript frontend
+  src-tauri/                        Rust backend
+  python-sidecar/                   Python sidecar (search/export engine)
+src/apple_music_history_converter/  Shared Python backend modules
+cloudflare-worker/                  Apple Music API proxy (Cloudflare Workers)
+```
+
+## License
+
+MIT

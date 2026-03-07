@@ -89,16 +89,12 @@ describe("ServicesSection parity wiring", () => {
     await waitFor(() => expect(commandMocks.getSettings).toHaveBeenCalledTimes(1));
   });
 
-  it("auto-checks API statuses on mount and renders refresh buttons", async () => {
+  it("auto-checks API statuses on mount", async () => {
     renderServices();
 
     // Auto-check fires on mount
     await waitFor(() => expect(commandMocks.checkItunesStatus).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(commandMocks.checkMusicBrainzApiStatus).toHaveBeenCalledTimes(1));
-
-    // Refresh buttons are rendered
-    expect(screen.getByTitle("Refresh iTunes status")).toBeTruthy();
-    expect(screen.getByTitle("Refresh MusicBrainz status")).toBeTruthy();
   });
 
   it("hydrates iTunes settings from settings_loaded events", async () => {

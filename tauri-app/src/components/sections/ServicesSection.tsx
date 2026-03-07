@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { AccordionSection } from "../ui/Accordion";
 import { SearchProvider, ExportFormat, PROVIDERS, EXPORT_FORMATS, ITUNES_COUNTRIES, AppleMusicStatus } from "../../lib/types";
 import { Warning, GlobeSimple, Key, TestTube, CheckCircle, XCircle, CaretDown, Timer, Pause, Play, Info, ArrowClockwise } from "@phosphor-icons/react";
@@ -10,6 +10,7 @@ import {
     getSettings,
     checkItunesStatus,
     checkMusicBrainzApiStatus,
+    checkAppleMusicApiStatus,
 } from "../../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -97,11 +98,16 @@ export function ServicesSection({
     const [previewFormat, setPreviewFormat] = useState<ExportFormat | null>(null);
     const [itunesApiStatus, setItunesApiStatus] = useState<ApiStatus>("idle");
     const [musicBrainzApiStatus, setMusicBrainzApiStatus] = useState<ApiStatus>("idle");
+    const [appleMusicApiStatus, setAppleMusicApiStatus] = useState<ApiStatus>("idle");
     const [itunesApiMessage, setItunesApiMessage] = useState("Status unknown");
     const [musicBrainzApiMessage, setMusicBrainzApiMessage] = useState("Status unknown");
 
     // Load Apple Music status and auto-check all API statuses on mount
+    const didInit = useRef(false);
     useEffect(() => {
+        if (didInit.current) return;
+        didInit.current = true;
+
         Promise.all([
             getAppleMusicStatus(),
             getSettings(),
@@ -109,6 +115,9 @@ export function ServicesSection({
 
         // Auto-check API statuses
         const checkStatuses = async () => {
+            try {
+                await checkAppleMusicApiStatus();
+            } catch { /* handled by event listener */ }
             try {
                 setItunesApiStatus("checking");
                 setItunesApiMessage("Checking iTunes API...");
@@ -235,6 +244,19 @@ export function ServicesSection({
                         setMusicBrainzApiStatus("rate_limited");
                     } else {
                         setMusicBrainzApiStatus("error");
+                    }
+                }
+
+                if (status.startsWith("Apple Music API:")) {
+                    const normalized = status.toLowerCase();
+                    if (normalized.includes("ok")) {
+                        setAppleMusicApiStatus("ok");
+                    } else if (normalized.includes("rate limited")) {
+                        setAppleMusicApiStatus("rate_limited");
+                    } else if (normalized.includes("not configured")) {
+                        setAppleMusicApiStatus("idle");
+                    } else {
+                        setAppleMusicApiStatus("error");
                     }
                 }
             })
@@ -447,11 +469,13 @@ export function ServicesSection({
                     <div className="space-y-1">
                         {(Object.entries(PROVIDERS) as [SearchProvider, typeof PROVIDERS[SearchProvider]][]).map(([id, info]) => {
                             // Inline status for each provider
-                            const providerStatus = id === "itunes" || id === "apple_music"
-                                ? { status: itunesApiStatus, message: itunesApiMessage }
-                                : id === "musicbrainz_api"
-                                    ? { status: musicBrainzApiStatus, message: musicBrainzApiMessage }
-                                    : null;
+                            const providerStatus = id === "apple_music"
+                                ? { status: appleMusicApiStatus }
+                                : id === "itunes"
+                                    ? { status: itunesApiStatus }
+                                    : id === "musicbrainz_api"
+                                        ? { status: musicBrainzApiStatus }
+                                        : null;
 
                             return (
                                 <label
@@ -760,7 +784,7 @@ export function ServicesSection({
                                 <button
                                     onClick={handleSaveAppleMusicConfig}
                                     disabled={!canSaveAppleMusicConfig}
-                                    className="flex-1 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex-1 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     {appleMusicMode === "shared_proxy" ? "Save & Enable" : "Save Credentials"}
                                 </button>
@@ -823,7 +847,7 @@ export function ServicesSection({
                                     </div>
                                     <button
                                         onClick={() => setShowLimitsInfo(false)}
-                                        className="mt-4 w-full px-3 py-2 text-xs font-medium bg-accent text-accent-foreground rounded-lg hover:bg-accent/90 transition-colors"
+                                        className="mt-4 w-full px-3 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
                                     >
                                         Got it
                                     </button>
@@ -832,44 +856,6 @@ export function ServicesSection({
                         )}
                     </>
                 )}
-
-                <div className="border-t border-border" />
-
-                <div>
-                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-                        API Status
-                    </div>
-                    <div className="space-y-1.5">
-                        <div className="flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground w-24 flex-shrink-0">iTunes</span>
-                            <div className="flex-1">
-                                {renderStatusPill(itunesApiStatus, itunesApiStatus === "checking" ? "Checking..." : itunesApiStatus === "idle" ? "Unknown" : itunesApiStatus === "ok" ? "Online" : itunesApiStatus === "rate_limited" ? "Rate Limited" : "Offline")}
-                            </div>
-                            <button
-                                onClick={handleCheckItunesStatus}
-                                disabled={itunesApiStatus === "checking"}
-                                title="Refresh iTunes status"
-                                className="p-1 rounded hover:bg-foreground-5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground"
-                            >
-                                <ArrowClockwise size={12} className={itunesApiStatus === "checking" ? "animate-spin" : ""} />
-                            </button>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground w-24 flex-shrink-0">MusicBrainz</span>
-                            <div className="flex-1">
-                                {renderStatusPill(musicBrainzApiStatus, musicBrainzApiStatus === "checking" ? "Checking..." : musicBrainzApiStatus === "idle" ? "Unknown" : musicBrainzApiStatus === "ok" ? "Online" : musicBrainzApiStatus === "rate_limited" ? "Rate Limited" : "Offline")}
-                            </div>
-                            <button
-                                onClick={handleCheckMusicBrainzApiStatus}
-                                disabled={musicBrainzApiStatus === "checking"}
-                                title="Refresh MusicBrainz status"
-                                className="p-1 rounded hover:bg-foreground-5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground"
-                            >
-                                <ArrowClockwise size={12} className={musicBrainzApiStatus === "checking" ? "animate-spin" : ""} />
-                            </button>
-                        </div>
-                    </div>
-                </div>
 
                 <div className="border-t border-border" />
 

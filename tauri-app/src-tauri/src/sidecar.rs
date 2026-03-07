@@ -352,6 +352,45 @@ python3 -m pip install -r {}",
                     )
                 })?;
 
+                // Auto-install Python dependencies from requirements.txt if present
+                let requirements = path.parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("requirements.txt");
+                if requirements.exists() {
+                    println!("[Sidecar] Checking Python dependencies...");
+                    let mut pip_cmd = Command::new(&python_cmd);
+                    pip_cmd.args(["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r"]);
+                    pip_cmd.arg(&requirements);
+                    pip_cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                    match pip_cmd.output() {
+                        Ok(output) => {
+                            if output.status.success() {
+                                println!("[Sidecar] Dependencies OK");
+                            } else {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                // Try with --break-system-packages for externally-managed envs (PEP 668)
+                                if stderr.contains("externally-managed") {
+                                    println!("[Sidecar] Retrying with --break-system-packages...");
+                                    let mut pip_retry = Command::new(&python_cmd);
+                                    pip_retry.args(["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--break-system-packages", "-r"]);
+                                    pip_retry.arg(&requirements);
+                                    pip_retry.stdout(Stdio::piped()).stderr(Stdio::piped());
+                                    if let Ok(retry_out) = pip_retry.output() {
+                                        if retry_out.status.success() {
+                                            println!("[Sidecar] Dependencies installed (break-system-packages)");
+                                        } else {
+                                            eprintln!("[Sidecar] Warning: pip install failed: {}", String::from_utf8_lossy(&retry_out.stderr));
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("[Sidecar] Warning: pip install failed: {}", stderr);
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("[Sidecar] Warning: Could not run pip: {}", e),
+                    }
+                }
+
                 let mut cmd = Command::new(python_cmd);
                 for arg in python_args {
                     cmd.arg(arg);
@@ -391,8 +430,10 @@ python3 -m pip install -r {}",
                         if let Ok(msg) = serde_json::from_str::<SidecarMessage>(&l) {
                             dispatch_message(&window_clone, msg);
                         } else {
-                            // Non-JSON output - log it
-                            println!("[Sidecar] {}", l);
+                            // Check if it looks like JSON that failed to parse
+                            if l.trim_start().starts_with('{') {
+                                eprintln!("[Sidecar PARSE FAIL] {}", &l[..l.len().min(200)]);
+                            }
                         }
                     }
                     Err(e) => {
@@ -418,7 +459,7 @@ python3 -m pip install -r {}",
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(l) = line {
-                    eprintln!("[Sidecar Error] {}", l);
+                    eprintln!("[Sidecar stderr] {}", l);
                 }
             }
         });
@@ -520,6 +561,11 @@ fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage) {
                 "total": total,
                 "found": found,
                 "missing": missing,
+            }));
+            // Also send a log so the user sees a "stopped" message
+            let _ = window.emit("sidecar_log", serde_json::json!({
+                "level": "info",
+                "message": format!("Search stopped by user ({} found, {} missing out of {})", found, missing, total),
             }));
         }
 

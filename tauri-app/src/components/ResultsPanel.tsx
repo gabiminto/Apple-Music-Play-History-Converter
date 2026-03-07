@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MagnifyingGlass, Play, Pause, Stop, CheckCircle, XCircle, Clock, Warning, ArrowClockwise, Export, Copy, FolderOpen } from "@phosphor-icons/react";
+import { MagnifyingGlass, Play, Pause, Stop, CheckCircle, XCircle, Clock, Warning, ArrowClockwise, Export, Copy, FolderOpen, FloppyDisk, Info } from "@phosphor-icons/react";
 import { Button } from "./ui/Button";
 import { Progress } from "./ui/Progress";
 import { Dialog } from "./ui/Dialog";
@@ -43,7 +43,7 @@ export function ResultsPanel({
     const [exporting, setExporting] = useState(false);
     const [skipPending, setSkipPending] = useState(false);
     const [rateLimitWait, setRateLimitWait] = useState({ active: false, seconds: 0 });
-    const [results, setResults] = useState<TrackResult[]>([]);
+    const [results, setResults] = useState<Map<number, TrackResult>>(new Map());
     const [missingReviewOpen, setMissingReviewOpen] = useState(false);
     const [missingQuery, setMissingQuery] = useState("");
     const [retryMissingPending, setRetryMissingPending] = useState(false);
@@ -87,25 +87,17 @@ export function ResultsPanel({
             const updates = pendingTrackUpdates.current;
             pendingTrackUpdates.current = new Map();
             setResults((prev) => {
-                const next = [...prev];
+                const next = new Map(prev);
                 updates.forEach((value, index) => {
-                    next[index] = value;
+                    next.set(index, value);
                 });
                 return next;
             });
         };
 
         unlisteners.push(
-            listen<{ rowCount: number }>("csv_loaded", (event) => {
-                setResults(
-                    new Array(event.payload.rowCount).fill(null).map(() => ({
-                        artist: "",
-                        track: "",
-                        album: "",
-                        status: "pending" as const,
-                        source: "",
-                    }))
-                );
+            listen<{ rowCount: number }>("csv_loaded", () => {
+                setResults(new Map());
                 setMissingReviewOpen(false);
                 setMissingQuery("");
             })
@@ -151,7 +143,7 @@ export function ResultsPanel({
     }, []);
 
     useEffect(() => {
-        setResults([]);
+        setResults(new Map());
         setMissingReviewOpen(false);
         setMissingQuery("");
         pendingTrackUpdates.current.clear();
@@ -275,18 +267,52 @@ export function ResultsPanel({
         }
     };
 
+    const handleSaveProgress = async () => {
+        setExporting(true);
+        try {
+            const dateSuffix = formatDateForFilename();
+            const outputPath = await save({
+                filters: [{ name: "Universal CSV", extensions: ["csv"] }],
+                defaultPath: `progress_${dateSuffix}.csv`,
+            });
+            if (outputPath) {
+                await exportResults("universal", outputPath);
+                onExported(outputPath);
+                toast.success("Progress saved. You can re-open this file later to continue searching.");
+            }
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setExporting(false);
+        }
+    };
+
     if (!isSearching && !progress) {
         return (
-            <div className="p-4 border-b border-border bg-foreground-5/30">
-                <Button onClick={handleStart} icon={<MagnifyingGlass size={18} />}>
+            <div className="px-4 py-3 border-b border-border">
+                <button
+                    onClick={handleStart}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-accent rounded-lg hover:bg-accent/90 transition-colors"
+                >
+                    <MagnifyingGlass size={15} weight="bold" />
                     Search with {PROVIDERS[provider].name}
-                </Button>
+                </button>
+                {provider === "apple_music" && (
+                    <p className="mt-1.5 text-[11px] text-muted-foreground/70 leading-relaxed max-w-lg">
+                        Uses album &amp; ISRC batch-matching before individual search — significantly faster for large libraries.
+                    </p>
+                )}
             </div>
         );
     }
 
     const rateLimited = progress?.rateLimited ?? 0;
-    const missingRows = results.filter((r) => r.status === "missing");
+    const isAppleMusic = provider === "apple_music";
+    const isPrepPhase = progress ? progress.current === 0 && isSearching : false;
+    const phaseNumber = progress?.status?.match(/Phase (\d)\/3/)?.[1];
+    const resultsArray = Array.from(results.values());
+    const foundTracks = resultsArray.filter((r) => r.status === "found").length;
+    const missingRows = resultsArray.filter((r) => r.status === "missing");
     const missingCount = missingRows.length > 0 ? missingRows.length : (progress?.missing ?? 0);
     const filteredMissingRows = missingQuery.trim()
         ? missingRows.filter((row) => {
@@ -296,195 +322,226 @@ export function ResultsPanel({
                 || row.album.toLowerCase().includes(q);
         })
         : missingRows;
+    const isComplete = progress?.status === "Complete";
+    const wasStopped = !isSearching && progress && !isComplete;
+    const pct = progress && progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
+
+    // Derive a clean display status (never show stale "Searching..." after stop)
+    const displayStatus = (() => {
+        if (isComplete) return "Complete";
+        if (wasStopped) return `Stopped · ${progress?.found ?? 0} found`;
+        if (isPaused) return "Paused";
+        return progress?.status || "";
+    })();
 
     return (
-        <div className="p-4 border-b border-border bg-foreground-5/30 space-y-4">
+        <div className="px-4 py-3 border-b border-border space-y-2">
+            {/* Export success banner */}
             {lastExportPath && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-success/5 border border-success/20 rounded-lg p-2">
-                    <CheckCircle size={14} weight="fill" className="text-success flex-shrink-0" />
-                    <span className="truncate flex-1 font-mono" title={lastExportPath}>{lastExportPath}</span>
+                <div className="flex items-center gap-2 text-[11px] text-success-text bg-success/5 border border-success/15 rounded-md px-2.5 py-1.5">
+                    <CheckCircle size={13} weight="fill" className="text-success flex-shrink-0" />
+                    <span className="truncate flex-1 font-mono text-[10px]" title={lastExportPath}>{lastExportPath}</span>
                     <button
                         onClick={async () => {
                             try {
-                                if (!navigator.clipboard?.writeText) {
-                                    throw new Error("Clipboard API unavailable");
-                                }
+                                if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
                                 await navigator.clipboard.writeText(lastExportPath);
-                                toast.success("Path copied to clipboard");
-                            } catch (error) {
-                                console.error(error);
-                                toast.error("Could not copy path to clipboard on this system");
-                            }
+                                toast.success("Path copied");
+                            } catch { toast.error("Could not copy path"); }
                         }}
-                        className="flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-foreground-5 flex-shrink-0"
-                        title="Copy path to clipboard"
+                        className="text-muted-foreground hover:text-foreground transition-colors px-1"
+                        title="Copy path"
                     >
-                        <Copy size={12} /> Copy
+                        <Copy size={11} />
                     </button>
                     <button
-                        onClick={async () => {
-                            try {
-                                await openFolder(lastExportPath);
-                            } catch { /* ignore */ }
-                        }}
-                        className="flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-foreground-5 flex-shrink-0"
-                        title="Show in Finder"
+                        onClick={async () => { try { await openFolder(lastExportPath); } catch { /* */ } }}
+                        className="text-muted-foreground hover:text-foreground transition-colors px-1"
+                        title="Show in folder"
                     >
-                        <FolderOpen size={12} /> Show
+                        <FolderOpen size={11} />
                     </button>
                 </div>
             )}
 
-            {/* Search controls */}
-            <div className="flex items-center gap-2">
-                {!isSearching && !progress && (
-                    <Button onClick={handleStart} icon={<MagnifyingGlass size={18} />}>
-                        Search with {PROVIDERS[provider].name}
-                    </Button>
-                )}
-                {isSearching && (
-                    <>
-                        <Button
-                            variant="secondary"
-                            onClick={handleTogglePause}
-                            icon={isPaused ? <Play size={18} /> : <Pause size={18} />}
-                        >
-                            {isPaused ? "Resume" : "Pause"}
-                        </Button>
-                        <Button variant="ghost" onClick={handleStop} icon={<Stop size={18} />}>
-                            Stop
-                        </Button>
-                        {rateLimitWait.active && (
-                            <Button
-                                variant="secondary"
-                                onClick={handleSkipCurrentWait}
-                                loading={skipPending}
+            {/* ── TOP ROW: status left, actions right ── */}
+            <div className="flex items-center justify-between gap-2">
+                {/* Left: status text */}
+                <span className="text-xs text-muted-foreground truncate">
+                    {displayStatus}
+                </span>
+
+                {/* Right: action buttons */}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                    {isSearching && (
+                        <>
+                            <button
+                                onClick={handleTogglePause}
+                                title={isPaused ? "Resume the search" : "Pause the search temporarily"}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded border border-border hover:bg-foreground-10 active:scale-95 transition-all"
                             >
-                                Skip Current Wait
-                            </Button>
-                        )}
-                    </>
-                )}
+                                {isPaused ? <Play size={11} weight="fill" /> : <Pause size={11} weight="fill" />}
+                                {isPaused ? "Resume" : "Pause"}
+                            </button>
+                            <button
+                                onClick={handleStop}
+                                title="Stop the search — you can export what's been found so far"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-muted-foreground rounded hover:bg-destructive/10 hover:text-destructive active:scale-95 transition-all"
+                            >
+                                <Stop size={11} weight="fill" />
+                                Stop
+                            </button>
+                            {rateLimitWait.active && (
+                                <button
+                                    onClick={handleSkipCurrentWait}
+                                    disabled={skipPending}
+                                    title="Skip the current rate-limit cooldown and continue searching"
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-warning rounded border border-warning/20 bg-warning/5 hover:bg-warning/15 active:scale-95 transition-all disabled:opacity-40"
+                                >
+                                    Skip ({Math.ceil(rateLimitWait.seconds)}s)
+                                </button>
+                            )}
+                        </>
+                    )}
+                    {!isSearching && (
+                        <>
+                            <button
+                                onClick={handleStart}
+                                title={`Restart the search using ${PROVIDERS[provider].name}`}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded border border-border hover:bg-foreground-10 active:scale-95 transition-all"
+                            >
+                                <ArrowClockwise size={11} />
+                                Search Again
+                            </button>
+                            {foundTracks > 0 && (
+                                <button
+                                    onClick={handleExport}
+                                    disabled={exporting}
+                                    title={`Export ${foundTracks.toLocaleString()} matched tracks as ${EXPORT_FORMATS[exportFormat].name}`}
+                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium text-white bg-accent rounded hover:bg-accent/85 hover:shadow-sm active:scale-95 transition-all disabled:opacity-40"
+                                >
+                                    <Export size={11} />
+                                    Export {foundTracks.toLocaleString()} · {EXPORT_FORMATS[exportFormat].name}
+                                </button>
+                            )}
+                            {foundTracks > 0 && wasStopped && (
+                                <button
+                                    onClick={handleSaveProgress}
+                                    disabled={exporting}
+                                    title="Save a CSV with current results — re-open it later to search only the missing tracks"
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-muted-foreground rounded border border-border/60 hover:bg-foreground-10 hover:text-foreground active:scale-95 transition-all disabled:opacity-40"
+                                >
+                                    <FloppyDisk size={11} />
+                                    Save for Later
+                                </button>
+                            )}
+                            {missingCount > 0 && (
+                                <button
+                                    onClick={() => setMissingReviewOpen(true)}
+                                    title={`Review ${missingCount} tracks that couldn't be matched — you can retry or export them`}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-muted-foreground rounded hover:bg-foreground-10 hover:text-foreground active:scale-95 transition-all"
+                                >
+                                    <XCircle size={11} />
+                                    {missingCount} missing
+                                </button>
+                            )}
+                            {rateLimited > 0 && (
+                                <button
+                                    onClick={handleRetryRateLimited}
+                                    title={`Retry ${rateLimited} tracks that were skipped due to API rate limits`}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-warning rounded hover:bg-warning/10 active:scale-95 transition-all"
+                                >
+                                    <ArrowClockwise size={11} />
+                                    Retry {rateLimited}
+                                </button>
+                            )}
+                        </>
+                    )}
+                </div>
             </div>
 
-            {isSearching && rateLimitWait.active && (
-                <div className="text-xs text-warning bg-warning/10 border border-warning/30 rounded-lg px-2.5 py-1.5 inline-flex items-center gap-1.5">
-                    <Warning size={12} weight="fill" />
-                    Waiting on iTunes rate limit ({Math.ceil(rateLimitWait.seconds)}s)
+            {/* ── CENTER: current track (hero element) ── */}
+            {progress?.currentTrack && isSearching && (
+                <div className="text-center py-1">
+                    <p className="text-sm font-medium truncate">{progress.currentTrack}</p>
                 </div>
             )}
 
-            {/* Progress display */}
+            {/* ── PROGRESS BAR + STATS ── */}
             {progress && (
-                <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
-                    <div className="flex justify-between text-sm">
-                        <span className="font-medium text-muted-foreground">{progress.status}</span>
-                        <span className="font-bold">
-                            {progress.current.toLocaleString()} / {progress.total.toLocaleString()}
-                        </span>
-                    </div>
-
-                    <Progress
-                        value={(progress.current / progress.total) * 100}
-                        showLabel
-                        elapsedSeconds={progress.elapsedSeconds}
-                        estimatedRemainingSeconds={progress.estimatedRemainingSeconds}
-                    />
-
-                    <div className="flex flex-wrap gap-4 text-sm mt-2">
-                        <span className="flex items-center gap-1 text-success">
-                            <CheckCircle size={16} weight="fill" />
-                            <strong>{progress.found.toLocaleString()}</strong> found
-                        </span>
-                        <span className="flex items-center gap-1 text-destructive">
-                            <XCircle size={16} weight="fill" />
-                            <strong>{progress.missing.toLocaleString()}</strong> missing
-                        </span>
-                        {rateLimited > 0 && (
-                            <span className="flex items-center gap-1 text-warning">
-                                <Warning size={16} weight="fill" />
-                                <strong>{rateLimited.toLocaleString()}</strong> rate-limited
-                            </span>
-                        )}
-                        {progress.estimatedRemainingSeconds !== undefined && progress.estimatedRemainingSeconds > 0 && (
-                            <span className="flex items-center gap-1 text-muted-foreground ml-auto">
-                                <Clock size={16} />
-                                ETA: {formatTime(progress.estimatedRemainingSeconds)}
-                            </span>
-                        )}
-                    </div>
-
-                    {progress.currentTrack && (
-                        <div className="text-xs text-muted-foreground truncate font-mono bg-background/50 p-1 rounded">
-                            {progress.currentTrack}
+                <div className="space-y-1">
+                    {progress.current > 0 ? (
+                        <>
+                            <div className="h-1 bg-foreground-5 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-accent rounded-full transition-all duration-500 ease-out"
+                                    style={{ width: `${pct}%` }}
+                                />
+                            </div>
+                            <div className="flex items-center gap-2 text-[11px] tabular-nums text-muted-foreground/70">
+                                <span>{pct.toFixed(0)}%</span>
+                                <span>{progress.current.toLocaleString()}/{progress.total.toLocaleString()}</span>
+                                <span className="text-border">·</span>
+                                <span className="text-success">{progress.found.toLocaleString()} found</span>
+                                {progress.missing > 0 && (
+                                    <>
+                                        <span className="text-border">·</span>
+                                        <span className="text-destructive">{progress.missing.toLocaleString()} missing</span>
+                                    </>
+                                )}
+                                {rateLimited > 0 && (
+                                    <>
+                                        <span className="text-border">·</span>
+                                        <span className="text-warning">{rateLimited.toLocaleString()} rate-limited</span>
+                                    </>
+                                )}
+                                <span className="ml-auto flex items-center gap-2">
+                                    {(progress.elapsedSeconds ?? 0) > 0 && (
+                                        <span>Elapsed {formatTime(progress.elapsedSeconds ?? 0)}</span>
+                                    )}
+                                    {(progress.estimatedRemainingSeconds ?? 0) > 0 && (
+                                        <span>ETA {formatTime(progress.estimatedRemainingSeconds ?? 0)}</span>
+                                    )}
+                                </span>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/60">
+                            {(progress.elapsedSeconds ?? 0) > 0 && (
+                                <span className="tabular-nums">Elapsed {formatTime(progress.elapsedSeconds ?? 0)}</span>
+                            )}
+                            {(progress.estimatedRemainingSeconds ?? 0) > 0 && (
+                                <>
+                                    <span className="text-border">·</span>
+                                    <span className="tabular-nums">ETA {formatTime(progress.estimatedRemainingSeconds ?? 0)}</span>
+                                </>
+                            )}
+                            {isPrepPhase && isAppleMusic && (
+                                <>
+                                    <span className="text-border">·</span>
+                                    <span>
+                                        {phaseNumber === "1" && "Album lookups cache all tracks — unavailable albums matched later"}
+                                        {phaseNumber === "2" && "ISRCs looked up in batches of 25"}
+                                        {!phaseNumber && "3-phase batch matching"}
+                                    </span>
+                                </>
+                            )}
                         </div>
                     )}
+
+                    {progress.current > 0 && progress.current <= 3 && isAppleMusic && isSearching && phaseNumber === "3" && (
+                        <p className="text-[10px] text-muted-foreground/50">
+                            Searching individually for remaining unmatched tracks
+                        </p>
+                    )}
                 </div>
             )}
 
-            {/* Post-search actions */}
-            {progress && !isSearching && (
-                <div className="pt-2 border-t border-border/50 space-y-2">
-                    {/* Export found tracks */}
-                    {progress.found > 0 && (
-                        <Button
-                            onClick={handleExport}
-                            loading={exporting}
-                            className="w-full"
-                            icon={<Export size={18} />}
-                        >
-                            Export {progress.found.toLocaleString()} Tracks as {EXPORT_FORMATS[exportFormat].name}
-                        </Button>
-                    )}
-
-                    {/* Secondary actions row */}
-                    <div className="flex flex-wrap gap-2">
-                        {missingCount > 0 && (
-                            <Button
-                                variant="secondary"
-                                onClick={() => setMissingReviewOpen(true)}
-                                className="text-xs"
-                                icon={<MagnifyingGlass size={14} />}
-                            >
-                                Review Missing Tracks
-                            </Button>
-                        )}
-
-                        {/* Export missing */}
-                        {missingCount > 0 && (
-                            <Button
-                                variant="secondary"
-                                onClick={handleExportMissing}
-                                className="text-xs"
-                                icon={<XCircle size={14} />}
-                            >
-                                Export {missingCount} Missing
-                            </Button>
-                        )}
-
-                        {/* Rate limited controls */}
-                        {rateLimited > 0 && (
-                            <>
-                                <Button
-                                    variant="secondary"
-                                    onClick={handleRetryRateLimited}
-                                    className="text-xs"
-                                    icon={<ArrowClockwise size={14} />}
-                                >
-                                    Retry {rateLimited} Rate-Limited
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    onClick={handleExportRateLimited}
-                                    className="text-xs"
-                                    icon={<Export size={14} />}
-                                >
-                                    Export Rate-Limited
-                                </Button>
-                            </>
-                        )}
-                    </div>
-                </div>
+            {/* Inline stopped guidance */}
+            {wasStopped && foundTracks === 0 && (
+                <p className="text-[11px] text-muted-foreground/50 text-center">
+                    Stopped before matching any tracks — click Search Again to restart
+                </p>
             )}
 
             <Dialog
@@ -550,7 +607,11 @@ export function ResultsPanel({
 }
 
 function formatTime(seconds: number): string {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) {
+        return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+    }
+    return `${m}:${s.toString().padStart(2, "0")}`;
 }

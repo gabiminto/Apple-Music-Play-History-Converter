@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import "./index.css";
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
@@ -7,7 +7,7 @@ import 'react-toastify/dist/ReactToastify.css';
 import { useTauri } from "./hooks/useTauri";
 import { useSearch } from "./hooks/useSearch";
 import { useResize } from "./hooks/useResize";
-import { MusicNotes, WarningCircle, Question, Info, SidebarSimple, CaretDown, CaretUp, Sun, Moon, CheckCircle, XCircle, Warning, Clock, File } from "@phosphor-icons/react";
+import { WarningCircle, Question, Info, SidebarSimple, CaretDown, CaretUp, Sun, Moon, CheckCircle, XCircle, Warning, Clock, File } from "@phosphor-icons/react";
 
 // Components
 import { FileSelection } from "./components/FileSelection";
@@ -22,6 +22,7 @@ import { Dialogs } from "./components/Dialogs";
 import { FileInfo, SearchProvider, ExportFormat, ResumeState, PROVIDERS } from "./lib/types";
 import { analyzeCsv, clearResumeState, getResumeState, getSettings, initializeSidecar, loadExportedCsv, restartSidecar, resumeSearch, startSearchMissingOnly } from "./lib/commands";
 import { listen } from "@tauri-apps/api/event";
+import appIcon from "./assets/app-icon.png";
 
 function App() {
   const isTauri = useTauri();
@@ -161,7 +162,7 @@ function App() {
     document.documentElement.classList.toggle("dark", isDark);
   }, [isDark]);
 
-  const handleFileSelect = (info: FileInfo) => {
+  const handleFileSelect = useCallback((info: FileInfo) => {
     // Check if this is a previously exported CSV
     if (info.isConvertedCsv && (info.missingCount ?? 0) > 0) {
       setExportedCsvInfo({
@@ -175,7 +176,7 @@ function App() {
     setFileInfo(info);
     setActiveTab("preview");
     toast.success(`Loaded ${info.name}`);
-  };
+  }, []);
 
   const handleClearFile = () => {
     setFileInfo(null);
@@ -252,9 +253,7 @@ function App() {
         <header className="p-4 border-b border-border bg-background/95 backdrop-blur-xl z-10 stagger-1">
           <div className="flex items-center justify-between">
             <h1 className="text-2xl font-bold flex items-center gap-3" style={{ fontFamily: 'var(--font-display)' }}>
-              <div className="p-2 rounded-xl bg-accent/10 text-accent shine-hover">
-                <MusicNotes size={28} weight="fill" />
-              </div>
+              <img src={appIcon} alt="App icon" width={44} height={44} className="rounded-xl" />
               <span className="bg-gradient-to-r from-foreground to-foreground-70 bg-clip-text text-transparent">
                 Play History Converter
               </span>
@@ -400,7 +399,7 @@ function App() {
                 {logPanel.collapsed ? <CaretUp size={12} /> : <CaretDown size={12} />}
                 {logPanel.collapsed ? "Show Log" : "Log"}
                 {logPanel.collapsed && unreadLogs > 0 ? (
-                  <span className="text-[10px] bg-accent text-accent-foreground px-1.5 py-0.5 rounded-full font-bold animate-pulse">
+                  <span className="text-[10px] bg-accent text-white px-1.5 py-0.5 rounded-full font-bold animate-pulse">
                     {unreadLogs}
                   </span>
                 ) : logs.length > 0 ? (
@@ -466,10 +465,10 @@ function App() {
           onCancel: handleResumeDiscarded,
         } : exportedCsvInfo ? {
           open: true,
-          title: "Previously Exported CSV Detected",
+          title: "Resume Previous Session?",
           content: <ExportedCsvContent info={exportedCsvInfo} />,
           confirmLabel: "Search Missing Tracks",
-          cancelLabel: "Load Normally",
+          cancelLabel: "Start Fresh",
           onConfirm: handleExportedCsvResume,
           onCancel: handleExportedCsvLoadNormally,
         } : null}
@@ -578,7 +577,7 @@ function ExportedCsvContent({ info }: { info: { fileInfo: FileInfo; foundCount: 
         <div className="min-w-0">
           <div className="text-sm font-medium truncate">{fileName}</div>
           <div className="text-[11px] text-muted-foreground">
-            This file appears to be a previously exported conversion result.
+            This file contains results from a previous search session.
           </div>
         </div>
       </div>
@@ -616,8 +615,8 @@ function ExportedCsvContent({ info }: { info: { fileInfo: FileInfo; foundCount: 
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Click "Search Missing Tracks" to re-search only the {info.missingCount.toLocaleString()} missing tracks,
-        or "Load Normally" to treat this as a regular CSV.
+        This looks like a file from a previous session. Click <strong>"Search Missing Tracks"</strong> to pick up where you left off — only the {info.missingCount.toLocaleString()} unmatched tracks will be searched.
+        You can also switch to a different search provider before resuming.
       </p>
     </div>
   );

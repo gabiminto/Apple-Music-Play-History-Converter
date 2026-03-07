@@ -73,10 +73,10 @@ export const EXPORT_FORMATS: Record<ExportFormat, { name: string; ext: string; d
 };
 
 export const PROVIDERS: Record<SearchProvider, { name: string; description: string; requiresDb?: boolean }> = {
-    musicbrainz: { name: "MusicBrainz (Local DB)", description: "Offline database, ~2GB download", requiresDb: true },
-    musicbrainz_api: { name: "MusicBrainz API", description: "Online, 1 request/second limit" },
-    itunes: { name: "iTunes API", description: "Online, good for Apple Music tracks" },
-    apple_music: { name: "Apple Music API", description: "Best accuracy, works out of the box (rate limited)" },
+    musicbrainz: { name: "MusicBrainz (Local DB)", description: "Fastest — searches offline database (~2GB download required)", requiresDb: true },
+    musicbrainz_api: { name: "MusicBrainz API", description: "Free online search, 1 request/second" },
+    itunes: { name: "iTunes API", description: "Good for Apple Music tracks, rate limited" },
+    apple_music: { name: "Apple Music API", description: "Best for Apple Music libraries — batch-matches albums and ISRCs first, then searches remaining tracks" },
 };
 
 export const ITUNES_COUNTRIES: Record<string, string> = {
