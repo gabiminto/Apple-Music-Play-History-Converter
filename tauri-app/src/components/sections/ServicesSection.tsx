@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { AccordionSection } from "../ui/Accordion";
 import { SearchProvider, ExportFormat, PROVIDERS, EXPORT_FORMATS, ITUNES_COUNTRIES, AppleMusicStatus } from "../../lib/types";
-import { Warning, GlobeSimple, Key, TestTube, CheckCircle, XCircle, CaretDown, Timer, Pause, Play, Info, ArrowClockwise } from "@phosphor-icons/react";
+import { Warning, GlobeSimple, Key, TestTube, CheckCircle, XCircle, CaretDown, Timer, Pause, Play, Info } from "@phosphor-icons/react";
 import {
     configureAppleMusic,
     testAppleMusicCredentials,
@@ -99,8 +99,6 @@ export function ServicesSection({
     const [itunesApiStatus, setItunesApiStatus] = useState<ApiStatus>("idle");
     const [musicBrainzApiStatus, setMusicBrainzApiStatus] = useState<ApiStatus>("idle");
     const [appleMusicApiStatus, setAppleMusicApiStatus] = useState<ApiStatus>("idle");
-    const [itunesApiMessage, setItunesApiMessage] = useState("Status unknown");
-    const [musicBrainzApiMessage, setMusicBrainzApiMessage] = useState("Status unknown");
 
     // Load Apple Music status and auto-check all API statuses on mount
     const didInit = useRef(false);
@@ -120,12 +118,10 @@ export function ServicesSection({
             } catch { /* handled by event listener */ }
             try {
                 setItunesApiStatus("checking");
-                setItunesApiMessage("Checking iTunes API...");
                 await checkItunesStatus();
             } catch { /* handled by event listener */ }
             try {
                 setMusicBrainzApiStatus("checking");
-                setMusicBrainzApiMessage("Checking MusicBrainz API...");
                 await checkMusicBrainzApiStatus();
             } catch { /* handled by event listener */ }
         };
@@ -225,7 +221,7 @@ export function ServicesSection({
                 const status = event.payload.status;
                 if (status.startsWith("iTunes API:")) {
                     const normalized = status.toLowerCase();
-                    setItunesApiMessage(status);
+
                     if (normalized.includes("ok")) {
                         setItunesApiStatus("ok");
                     } else if (normalized.includes("rate limited")) {
@@ -237,7 +233,7 @@ export function ServicesSection({
 
                 if (status.startsWith("MusicBrainz API:")) {
                     const normalized = status.toLowerCase();
-                    setMusicBrainzApiMessage(status);
+
                     if (normalized.includes("ok")) {
                         setMusicBrainzApiStatus("ok");
                     } else if (normalized.includes("rate limited")) {
@@ -266,11 +262,9 @@ export function ServicesSection({
             listen<{ error: string; context?: string }>("sidecar_error", (event) => {
                 if (event.payload.context === "check_itunes_status") {
                     setItunesApiStatus("error");
-                    setItunesApiMessage(`iTunes API: ${event.payload.error}`);
                 }
                 if (event.payload.context === "check_musicbrainz_api_status") {
                     setMusicBrainzApiStatus("error");
-                    setMusicBrainzApiMessage(`MusicBrainz API: ${event.payload.error}`);
                 }
             })
         );
@@ -401,31 +395,6 @@ export function ServicesSection({
         }
     };
 
-    const handleCheckItunesStatus = async () => {
-        setItunesApiStatus("checking");
-        setItunesApiMessage("Checking iTunes API...");
-        try {
-            await checkItunesStatus();
-        } catch (err) {
-            console.error(err);
-            setItunesApiStatus("error");
-            setItunesApiMessage("iTunes API: check failed");
-            toast.error("Failed to check iTunes API status");
-        }
-    };
-
-    const handleCheckMusicBrainzApiStatus = async () => {
-        setMusicBrainzApiStatus("checking");
-        setMusicBrainzApiMessage("Checking MusicBrainz API...");
-        try {
-            await checkMusicBrainzApiStatus();
-        } catch (err) {
-            console.error(err);
-            setMusicBrainzApiStatus("error");
-            setMusicBrainzApiMessage("MusicBrainz API: check failed");
-            toast.error("Failed to check MusicBrainz API status");
-        }
-    };
 
     const renderStatusPill = (status: ApiStatus, message: string) => {
         if (status === "idle" || status === "checking") {

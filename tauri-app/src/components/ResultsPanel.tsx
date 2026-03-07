@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { MagnifyingGlass, Play, Pause, Stop, CheckCircle, XCircle, Clock, Warning, ArrowClockwise, Export, Copy, FolderOpen, FloppyDisk, Info } from "@phosphor-icons/react";
+import { MagnifyingGlass, Play, Pause, Stop, CheckCircle, XCircle, ArrowClockwise, Export, Copy, FolderOpen, FloppyDisk } from "@phosphor-icons/react";
 import { Button } from "./ui/Button";
-import { Progress } from "./ui/Progress";
+
 import { Dialog } from "./ui/Dialog";
 import { SearchProgress, PROVIDERS, EXPORT_FORMATS, SearchProvider, ExportFormat } from "../lib/types";
-import { startSearch, stopSearch, togglePause, exportResults, exportMissing, exportRateLimited, retryRateLimited, retryMissing, skipRateLimitWait, openFolder } from "../lib/commands";
+import { startSearch, stopSearch, togglePause, exportResults, exportMissing, retryRateLimited, retryMissing, skipRateLimitWait, openFolder } from "../lib/commands";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "react-toastify";
@@ -210,21 +210,6 @@ export function ResultsPanel({
             });
             if (outputPath) {
                 await exportMissing(outputPath);
-            }
-        } catch (err) {
-            console.error(err);
-        }
-    };
-
-    const handleExportRateLimited = async () => {
-        try {
-            const dateSuffix = formatDateForFilename();
-            const outputPath = await save({
-                filters: [{ name: "CSV Files", extensions: ["csv"] }],
-                defaultPath: `rate_limited_tracks_${dateSuffix}.csv`
-            });
-            if (outputPath) {
-                await exportRateLimited(outputPath);
             }
         } catch (err) {
             console.error(err);
