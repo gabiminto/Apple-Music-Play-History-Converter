@@ -45,7 +45,7 @@
     },
     "macOS": {
       "minimumSystemVersion": "10.13",
-      "signingIdentity": null,
+      "signingIdentity": "Developer ID Application: Ashraf Ali (7HQVB2S4BX)",
       "entitlements": null
     },
     "windows": {
