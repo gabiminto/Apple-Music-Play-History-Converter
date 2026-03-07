@@ -106,3 +106,4 @@ build_all_platforms.sh
 test_build.sh
 
 .worktrees
+.serena/
