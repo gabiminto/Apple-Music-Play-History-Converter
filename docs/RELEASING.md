@@ -6,6 +6,7 @@ This document is the canonical release playbook for the Tauri desktop app.
 
 - End users must not need Python, pip, or sidecar dependencies installed
 - macOS artifacts must be signed and notarized before distribution
+- macOS releases must include both Apple Silicon and Intel DMGs
 - Windows artifacts must include the offline WebView2 runtime path
 - Release diagnostics must be available in user log folders for startup failures
 - Git tag, GitHub release, and binary versions must match
@@ -84,12 +85,15 @@ That script does two things:
 
 Important sidecar behavior:
 
-- build dependencies are installed into `tauri-app/python-sidecar/.bundle-venv`
+- build dependencies are installed into `tauri-app/python-sidecar/.bundle-venv-<arch>`
 - the final sidecar binary is emitted to `tauri-app/python-sidecar/dist/`
 - on macOS, the sidecar binary is signed during the build script
+- on macOS, Intel builds follow `TAURI_ENV_ARCH=x86_64` and force the sidecar venv through `arch -x86_64`
 - the packaged app includes sidecar resources from `tauri-app/python-sidecar/dist/*`
 
-## Build the Signed macOS Release
+## Build the Signed macOS Releases
+
+Build Apple Silicon:
 
 ```bash
 cd tauri-app
@@ -102,30 +106,50 @@ export APPLE_SIGNING_IDENTITY="Developer ID Application: YOUR NAME (TEAM_ID)"
 npm run tauri build
 ```
 
-Expected outputs:
+Expected Apple Silicon outputs:
 
 - `tauri-app/src-tauri/target/release/bundle/macos/Apple Music History Converter.app`
 - `tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg`
 
+Build Intel:
+
+```bash
+cd tauri-app
+set -a
+source ../.env
+set +a
+export APPLE_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
+export APPLE_SIGNING_IDENTITY="Developer ID Application: YOUR NAME (TEAM_ID)"
+
+npm run tauri build -- --target x86_64-apple-darwin
+```
+
+Expected Intel outputs:
+
+- `tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Apple Music History Converter.app`
+- `tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg`
+
 ### Validate the macOS Build
 
-Check the app:
+Check both apps:
 
 ```bash
 spctl -a -vv "tauri-app/src-tauri/target/release/bundle/macos/Apple Music History Converter.app"
+spctl -a -vv "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Apple Music History Converter.app"
 ```
 
 The expected result is `accepted` with `source=Notarized Developer ID`.
 
-Validate the DMG staple:
+Validate both DMG staples:
 
 ```bash
 xcrun stapler validate "tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg"
+xcrun stapler validate "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg"
 ```
 
-### Notarize the DMG Explicitly
+### Notarize the DMGs Explicitly
 
-If you want to explicitly submit and staple the DMG after the build:
+If you want to explicitly submit and staple the DMGs after the build:
 
 ```bash
 xcrun notarytool submit "tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg" \
@@ -135,6 +159,14 @@ xcrun notarytool submit "tauri-app/src-tauri/target/release/bundle/dmg/Apple Mus
   --wait
 
 xcrun stapler staple "tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg"
+
+xcrun notarytool submit "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg" \
+  --apple-id "$APPLE_ID" \
+  --team-id "$APPLE_TEAM_ID" \
+  --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+  --wait
+
+xcrun stapler staple "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg"
 ```
 
 ## Build the Windows Release
@@ -184,6 +216,7 @@ Do not commit `release-artifacts/`.
 ```bash
 shasum -a 256 \
   "tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg" \
+  "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg" \
   "release-artifacts/v<VERSION>/Apple Music History Converter_<VERSION>_x64_en-US.msi" \
   "release-artifacts/v<VERSION>/Apple Music History Converter_<VERSION>_x64-setup.exe"
 ```
@@ -203,7 +236,7 @@ git push origin v<VERSION>
 
 Confirm that `release-artifacts/` is still untracked before committing.
 
-Prepare release notes, then publish with GitHub CLI:
+Prepare release notes, then publish with GitHub CLI after both macOS DMGs and both Windows installers are ready:
 
 ```bash
 gh release create v<VERSION> \
@@ -211,8 +244,17 @@ gh release create v<VERSION> \
   --title "v<VERSION> - <TITLE>" \
   --notes-file /tmp/release-notes.md \
   "tauri-app/src-tauri/target/release/bundle/dmg/Apple Music History Converter_<VERSION>_aarch64.dmg" \
+  "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg#Apple.Music.History.Converter_<VERSION>_x64.dmg" \
   "release-artifacts/v<VERSION>/Apple Music History Converter_<VERSION>_x64_en-US.msi" \
   "release-artifacts/v<VERSION>/Apple Music History Converter_<VERSION>_x64-setup.exe"
+```
+
+Only use `gh release upload` if the release already exists and you need to patch in a missing asset:
+
+```bash
+gh release upload v<VERSION> \
+  --repo nerveband/Apple-Music-Play-History-Converter \
+  "tauri-app/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Apple Music History Converter_<VERSION>_x64.dmg#Apple.Music.History.Converter_<VERSION>_x64.dmg"
 ```
 
 ## Logs to Request From Users

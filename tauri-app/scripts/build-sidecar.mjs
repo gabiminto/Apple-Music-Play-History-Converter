@@ -8,20 +8,36 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const tauriRoot = path.resolve(__dirname, "..");
 const sidecarDir = path.join(tauriRoot, "python-sidecar");
-const venvDir = path.join(sidecarDir, ".bundle-venv");
 const requirementsPath = path.join(sidecarDir, "requirements.txt");
 const specPath = path.join(sidecarDir, "sidecar.spec");
 const distDir = path.join(sidecarDir, "dist");
 const buildDir = path.join(sidecarDir, "build");
+const outputBinary = process.platform === "win32"
+  ? path.join(distDir, "sidecar.exe")
+  : path.join(distDir, "sidecar");
+const targetArch = normalizeArch(process.env.TAURI_ENV_ARCH || process.arch);
+const venvDir = path.join(sidecarDir, `.bundle-venv-${targetArch}`);
 const pyInstallerMarker = process.platform === "win32"
   ? path.join(venvDir, "Scripts", "pyinstaller.exe")
   : path.join(venvDir, "bin", "pyinstaller");
 const venvPython = process.platform === "win32"
   ? path.join(venvDir, "Scripts", "python.exe")
   : path.join(venvDir, "bin", "python");
-const outputBinary = process.platform === "win32"
-  ? path.join(distDir, "sidecar.exe")
-  : path.join(distDir, "sidecar");
+const venvPythonCommand = process.platform === "darwin" && targetArch === "x86_64"
+  ? { command: "/usr/bin/arch", baseArgs: ["-x86_64", venvPython] }
+  : { command: venvPython, baseArgs: [] };
+
+function normalizeArch(arch) {
+  if (arch === "x64" || arch === "x86_64") {
+    return "x86_64";
+  }
+
+  if (arch === "aarch64" || arch === "arm64") {
+    return "arm64";
+  }
+
+  return arch;
+}
 
 function run(command, args, options = {}) {
   const display = [command, ...args].join(" ");
@@ -36,21 +52,56 @@ function run(command, args, options = {}) {
   }
 }
 
+function probePython(command, baseArgs, expectedArch) {
+  const probe = spawnSync(
+    command,
+    [
+      ...baseArgs,
+      "-c",
+      [
+        "import platform",
+        "import sys",
+        `expected = ${JSON.stringify(expectedArch)}`,
+        "actual = platform.machine()",
+        "print(actual)",
+        "sys.exit(0 if actual == expected else 1)",
+      ].join("; "),
+    ],
+    { encoding: "utf8" },
+  );
+
+  return probe.status === 0;
+}
+
 function findPython() {
+  const preferredPython = process.env.SIDECAR_PYTHON?.trim();
+
+  if (preferredPython) {
+    const candidate = { command: preferredPython, baseArgs: [] };
+    if (probePython(candidate.command, candidate.baseArgs, targetArch)) {
+      return candidate;
+    }
+  }
+
   const candidates = process.platform === "win32"
     ? [
         ["py", ["-3"]],
         ["python", []],
         ["python3", []],
       ]
+    : process.platform === "darwin" && targetArch === "x86_64"
+      ? [
+          ["/usr/bin/arch", ["-x86_64", "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"]],
+          ["/usr/bin/arch", ["-x86_64", "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"]],
+          ["/usr/bin/arch", ["-x86_64", "/usr/local/bin/python3"]],
+        ]
     : [
         ["python3", []],
         ["python", []],
       ];
 
   for (const [command, baseArgs] of candidates) {
-    const probe = spawnSync(command, [...baseArgs, "--version"], { encoding: "utf8" });
-    if (probe.status === 0) {
+    if (probePython(command, baseArgs, targetArch)) {
       return { command, baseArgs };
     }
   }
@@ -66,10 +117,10 @@ function ensureVenv(python) {
 
 function ensureBuildEnvironment() {
   if (!existsSync(pyInstallerMarker)) {
-    run(venvPython, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], { cwd: sidecarDir });
-    run(venvPython, ["-m", "pip", "install", "-r", requirementsPath, "pyinstaller"], { cwd: sidecarDir });
+    run(venvPythonCommand.command, [...venvPythonCommand.baseArgs, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], { cwd: sidecarDir });
+    run(venvPythonCommand.command, [...venvPythonCommand.baseArgs, "-m", "pip", "install", "-r", requirementsPath, "pyinstaller"], { cwd: sidecarDir });
   } else {
-    run(venvPython, ["-m", "pip", "install", "--disable-pip-version-check", "-r", requirementsPath], { cwd: sidecarDir });
+    run(venvPythonCommand.command, [...venvPythonCommand.baseArgs, "-m", "pip", "install", "--disable-pip-version-check", "-r", requirementsPath], { cwd: sidecarDir });
   }
 }
 
@@ -107,14 +158,15 @@ function main() {
 
   const python = findPython();
   if (!python) {
-    throw new Error("Python 3.8+ is required to build the bundled sidecar");
+    throw new Error(`Python 3.8+ for target arch ${targetArch} is required to build the bundled sidecar`);
   }
 
+  console.log(`[build-sidecar] Building ${process.platform} sidecar for ${targetArch}`);
   ensureVenv(python);
   ensureBuildEnvironment();
   cleanBuildArtifacts();
 
-  run(venvPython, ["-m", "PyInstaller", "--noconfirm", specPath], { cwd: sidecarDir });
+  run(venvPythonCommand.command, [...venvPythonCommand.baseArgs, "-m", "PyInstaller", "--noconfirm", specPath], { cwd: sidecarDir });
 
   if (!existsSync(outputBinary)) {
     throw new Error(`Bundled sidecar binary was not created at ${outputBinary}`);

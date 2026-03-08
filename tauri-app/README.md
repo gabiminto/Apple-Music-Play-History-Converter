@@ -49,6 +49,8 @@ Release builds are intended to be self-contained for end users. They should not 
   - `APPLE_TEAM_ID`
   - `APPLE_PASSWORD`
 - If your shell environment stores `APPLE_APP_SPECIFIC_PASSWORD`, export `APPLE_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"` before building
+- Build Apple Silicon with `npm run tauri build`
+- Build Intel with `npm run tauri build -- --target x86_64-apple-darwin`
 
 ### Windows
 

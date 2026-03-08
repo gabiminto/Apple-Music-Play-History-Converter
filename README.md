@@ -8,7 +8,8 @@ Convert your Apple Music play history CSV exports into formats compatible with L
 
 Download the latest release for your platform from the [Releases](https://github.com/nerveband/Apple-Music-Play-History-Converter/releases) page:
 
-- **macOS** — `.dmg` (signed and notarized)
+- **macOS Apple Silicon** — `.dmg` (signed and notarized)
+- **macOS Intel** — `.dmg` (signed and notarized)
 - **Windows** — `.msi` installer or `.exe` (NSIS)
 
 ## Features
