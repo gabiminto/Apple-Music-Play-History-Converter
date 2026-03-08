@@ -44,3 +44,10 @@ Use:
 ## Current Architecture Rule
 
 New development must target the Tauri app and its sidecar flow.
+
+## Release Workflow
+
+- Canonical maintainer release steps: `docs/RELEASING.md`
+- Short operational checklist for agents: `AGENTS.md`
+- Do not commit `release-artifacts/`
+- Keep versions in sync across `tauri-app/package.json`, `tauri-app/src-tauri/Cargo.toml`, and `tauri-app/src-tauri/tauri.conf.json`
