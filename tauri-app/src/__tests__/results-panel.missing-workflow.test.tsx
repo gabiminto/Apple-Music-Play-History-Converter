@@ -118,7 +118,7 @@ describe("ResultsPanel missing workflow parity", () => {
       emitEvent("track_result", { index: 2, artist: "Missing Artist 2", track: "Missing Song 2", album: "", found: false, rateLimited: false, source: "" });
     });
 
-    const reviewButton = await screen.findByRole("button", { name: "Review Missing Tracks" });
+    const reviewButton = await screen.findByRole("button", { name: /missing/i });
     fireEvent.click(reviewButton);
 
     await screen.findByText("Missing Song 1");

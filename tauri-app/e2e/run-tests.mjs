@@ -60,9 +60,9 @@ async function runTests() {
     );
   });
 
-  await test('App version is 3.0.0', async () => {
+  await test('App version is 3.0.1', async () => {
     const info = await client.appInfo();
-    assert(info.app.version === '3.0.0', `Version: ${info.app.version}`);
+    assert(info.app.version === '3.0.1', `Version: ${info.app.version}`);
   });
 
   await test('Main window is visible', async () => {

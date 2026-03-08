@@ -8,6 +8,7 @@ import { startSearch, stopSearch, togglePause, exportResults, exportMissing, ret
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "react-toastify";
+import { getShortError } from "../lib/errors";
 
 interface ResultsPanelProps {
     progress: SearchProgress | null;
@@ -156,6 +157,7 @@ export function ResultsPanel({
         } catch (err) {
             console.error(err);
             onSearchStatusChange(false, false);
+            toast.error(`Search could not start: ${getShortError(err, "Open the logs folder for details.")}`);
         }
     };
 
@@ -196,6 +198,7 @@ export function ResultsPanel({
             }
         } catch (err) {
             console.error(err);
+            toast.error(`Export failed: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setExporting(false);
         }
@@ -213,6 +216,7 @@ export function ResultsPanel({
             }
         } catch (err) {
             console.error(err);
+            toast.error(`Could not export missing tracks: ${getShortError(err, "Open the logs folder for details.")}`);
         }
     };
 
@@ -235,7 +239,7 @@ export function ResultsPanel({
         } catch (err) {
             console.error(err);
             onSearchStatusChange(false, false);
-            toast.error("Failed to retry missing tracks");
+            toast.error(`Failed to retry missing tracks: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setRetryMissingPending(false);
         }
@@ -248,7 +252,7 @@ export function ResultsPanel({
         } catch (err) {
             console.error(err);
             setSkipPending(false);
-            toast.error("Failed to skip current wait");
+            toast.error(`Failed to skip current wait: ${getShortError(err, "Open the logs folder for details.")}`);
         }
     };
 
@@ -267,6 +271,7 @@ export function ResultsPanel({
             }
         } catch (err) {
             console.error(err);
+            toast.error(`Could not save progress: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setExporting(false);
         }

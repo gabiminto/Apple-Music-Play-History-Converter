@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.0.1
+
+### Fixed
+
+- Bundled the Python sidecar for macOS and Windows release builds so users no longer depend on system Python or pip packages
+- Added durable session logs with OS, app version, launch time, and sidecar lifecycle metadata for startup and search failures
+- Made backend startup failures visible in the UI with direct log access for support
+- Bundled the Windows WebView2 offline installer for first-run installs
+- Defaulted local/test macOS release builds to ad-hoc signing while preserving Developer ID signing via environment variables for real releases
+- Aligned the Tauri JS/Rust toolchain to current 2.x releases, fixing the Windows MSI `__TAURI_BUNDLE_TYPE` patch warning
+
 ## 3.0.0
 
 Complete rewrite as a native desktop app using Tauri, replacing the legacy Python/Toga UI.

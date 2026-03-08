@@ -20,6 +20,7 @@ Feature Flag Support:
 """
 
 import sys
+import os
 import logging
 import json
 import platform
@@ -166,6 +167,19 @@ DEFAULT_LOGGING_SETTINGS = {
 }
 
 
+def _env_flag(name: str) -> Optional[bool]:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def load_logging_settings() -> Dict[str, Any]:
     """
     Load logging settings from settings.json.
@@ -180,12 +194,20 @@ def load_logging_settings() -> Dict[str, Any]:
             with open(settings_path, 'r') as f:
                 settings = json.load(f)
                 # Return logging section if it exists, otherwise defaults
-                return settings.get("logging", DEFAULT_LOGGING_SETTINGS.copy())
+                resolved = settings.get("logging", DEFAULT_LOGGING_SETTINGS.copy())
+                console_override = _env_flag("APPLE_MUSIC_CONSOLE_LOGGING")
+                if console_override is not None:
+                    resolved["console_logging"] = console_override
+                return resolved
     except Exception:
         # Silently fall back to defaults if loading fails
         pass
 
-    return DEFAULT_LOGGING_SETTINGS.copy()
+    resolved = DEFAULT_LOGGING_SETTINGS.copy()
+    console_override = _env_flag("APPLE_MUSIC_CONSOLE_LOGGING")
+    if console_override is not None:
+        resolved["console_logging"] = console_override
+    return resolved
 
 
 def is_logging_enabled() -> bool:

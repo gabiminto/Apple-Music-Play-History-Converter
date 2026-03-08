@@ -1,8 +1,11 @@
-use std::sync::Mutex;
-use tauri::{State, Manager};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Mutex;
+use tauri::{Manager, State};
 
+mod diagnostics;
 mod sidecar;
+use diagnostics::{resolve_log_dir, SessionDiagnostics};
 use sidecar::SidecarManager;
 
 // Shared Types
@@ -55,6 +58,105 @@ pub struct DatabaseStatus {
 pub struct AppState {
     pub sidecar: Mutex<SidecarManager>,
     pub loaded_file: Mutex<Option<String>>,
+    pub diagnostics: SessionDiagnostics,
+    pub startup_issue: Mutex<Option<String>>,
+}
+
+fn set_startup_issue(state: &AppState, issue: Option<String>) {
+    if let Ok(mut slot) = state.startup_issue.lock() {
+        *slot = issue;
+    }
+}
+
+fn current_startup_issue(state: &AppState) -> Option<String> {
+    state.startup_issue.lock().ok().and_then(|issue| issue.clone())
+}
+
+fn format_sidecar_error(state: &AppState, action: &str, error: &str) -> String {
+    let mut lines = vec![format!("The search backend failed while {}.", action), error.to_string()];
+
+    if let Some(issue) = current_startup_issue(state) {
+        if issue != error {
+            lines.push(format!("Startup issue: {}", issue));
+        }
+    }
+
+    lines.push(format!(
+        "Session log: {}",
+        state.diagnostics.session_log_path().display()
+    ));
+
+    lines.join("\n")
+}
+
+fn send_sidecar_action(
+    state: &State<'_, AppState>,
+    action: &'static str,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let mut sidecar = state
+        .sidecar
+        .lock()
+        .map_err(|_| "Failed to lock sidecar".to_string())?;
+
+    sidecar.send(payload).map_err(|err| {
+        let detailed = format_sidecar_error(state.inner(), action, &err);
+        state.diagnostics.log_event(
+            "sidecar_command_failed",
+            "Failed to send command to sidecar",
+            json!({
+                "action": action,
+                "error": err,
+                "startupIssue": current_startup_issue(state.inner()),
+            }),
+        );
+        detailed
+    })
+}
+
+fn ensure_sidecar_running(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "No main window".to_string())?;
+    let mut sidecar = state
+        .sidecar
+        .lock()
+        .map_err(|_| "Failed to lock sidecar".to_string())?;
+
+    if sidecar.is_alive() {
+        return Ok(());
+    }
+
+    match sidecar.start(window, state.diagnostics.clone()) {
+        Ok(()) => {
+            set_startup_issue(state.inner(), None);
+            state.diagnostics.log_event(
+                "sidecar_started",
+                "Started sidecar process",
+                json!({ "reason": "ensure_sidecar_running" }),
+            );
+            Ok(())
+        }
+        Err(err) => {
+            set_startup_issue(state.inner(), Some(err.clone()));
+            state.diagnostics.log_event(
+                "sidecar_start_failed",
+                "Failed to start sidecar process",
+                json!({
+                    "reason": "ensure_sidecar_running",
+                    "error": err,
+                }),
+            );
+            Err(format_sidecar_error(
+                state.inner(),
+                "starting the search backend",
+                &err,
+            ))
+        }
+    }
 }
 
 /// Detect CSV file type from the first line (header row).
@@ -113,15 +215,7 @@ async fn analyze_csv(
         .map_err(|e| format!("Task failed: {}", e))?
         ?;
 
-    // Also tell sidecar to analyze (it will emit a fileAnalysis event with more detail)
-    if let Ok(mut sidecar) = state.sidecar.lock() {
-        let _ = sidecar.send(serde_json::json!({
-            "action": "analyzeCSV",
-            "path": path
-        }));
-    }
-
-    Ok(FileInfo {
+    let info = FileInfo {
         path,
         name: file_name,
         size: file_size,
@@ -130,7 +224,39 @@ async fn analyze_csv(
         is_converted_csv: false,
         found_count: 0,
         missing_count: 0,
-    })
+    };
+
+    state.diagnostics.log_event(
+        "csv_analyzed",
+        "Analyzed CSV file",
+        json!({
+            "path": info.path,
+            "name": info.name,
+            "sizeBytes": info.size,
+            "rowCount": info.row_count,
+            "fileType": info.file_type,
+        }),
+    );
+
+    // Also tell sidecar to analyze (it will emit a fileAnalysis event with more detail)
+    if let Ok(mut sidecar) = state.sidecar.lock() {
+        if let Err(err) = sidecar.send(serde_json::json!({
+            "action": "analyzeCSV",
+            "path": info.path
+        })) {
+            state.diagnostics.log_event(
+                "sidecar_command_failed",
+                "Failed to request sidecar CSV analysis",
+                json!({
+                    "action": "analyzeCSV",
+                    "path": info.path,
+                    "error": err,
+                }),
+            );
+        }
+    }
+
+    Ok(info)
 }
 
 #[tauri::command]
@@ -139,21 +265,28 @@ async fn start_search(
     file_path: String,
     provider: String,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-
     // Only reload CSV if the file changed
     let mut loaded = state.loaded_file.lock().map_err(|_| "Failed to lock loaded_file")?;
     let needs_load = loaded.as_deref() != Some(&file_path);
     if needs_load {
-        sidecar.send(serde_json::json!({
+        send_sidecar_action(&state, "loading the selected CSV", serde_json::json!({
             "action": "loadCSV",
             "path": file_path
         }))?;
         *loaded = Some(file_path);
     }
 
+    state.diagnostics.log_event(
+        "search_requested",
+        "Requested track search",
+        json!({
+            "filePath": loaded.as_deref(),
+            "provider": provider,
+        }),
+    );
+
     // Start search
-    sidecar.send(serde_json::json!({
+    send_sidecar_action(&state, "starting a search", serde_json::json!({
         "action": "startSearch",
         "provider": provider
     }))?;
@@ -163,22 +296,26 @@ async fn start_search(
 
 #[tauri::command]
 async fn stop_search(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "stopSearch" }))?;
+    state.diagnostics.log_event("search_stop_requested", "Requested search stop", json!({}));
+    send_sidecar_action(&state, "stopping the current search", serde_json::json!({ "action": "stopSearch" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn toggle_pause(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "pauseSearch" }))?;
+    state.diagnostics.log_event("search_pause_toggled", "Toggled search pause state", json!({}));
+    send_sidecar_action(&state, "toggling search pause", serde_json::json!({ "action": "pauseSearch" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn resume_search(state: State<'_, AppState>, provider: Option<String>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "search_resume_requested",
+        "Requested search resume",
+        json!({ "provider": provider }),
+    );
+    send_sidecar_action(&state, "resuming a saved search", serde_json::json!({
         "action": "resumeSearch",
         "provider": provider
     }))?;
@@ -187,15 +324,14 @@ async fn resume_search(state: State<'_, AppState>, provider: Option<String>) -> 
 
 #[tauri::command]
 async fn get_resume_state(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "getResumeState" }))?;
+    send_sidecar_action(&state, "loading saved search state", serde_json::json!({ "action": "getResumeState" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn clear_resume_state(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "clearResumeState" }))?;
+    state.diagnostics.log_event("resume_state_cleared", "Requested clearing saved search state", json!({}));
+    send_sidecar_action(&state, "clearing saved search state", serde_json::json!({ "action": "clearResumeState" }))?;
     Ok(())
 }
 
@@ -205,8 +341,15 @@ async fn export_results(
     format: String,
     output_path: String,
 ) -> Result<String, String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "export_requested",
+        "Requested export of matched results",
+        json!({
+            "format": format,
+            "outputPath": output_path,
+        }),
+    );
+    send_sidecar_action(&state, "exporting matched results", serde_json::json!({
         "action": "export",
         "format": format,
         "path": output_path
@@ -219,8 +362,12 @@ async fn export_missing(
     state: State<'_, AppState>,
     output_path: String,
 ) -> Result<String, String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "export_missing_requested",
+        "Requested export of missing tracks",
+        json!({ "outputPath": output_path }),
+    );
+    send_sidecar_action(&state, "exporting missing tracks", serde_json::json!({
         "action": "exportMissing",
         "path": output_path
     }))?;
@@ -232,8 +379,12 @@ async fn export_rate_limited(
     state: State<'_, AppState>,
     output_path: String,
 ) -> Result<String, String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "export_rate_limited_requested",
+        "Requested export of rate-limited tracks",
+        json!({ "outputPath": output_path }),
+    );
+    send_sidecar_action(&state, "exporting rate-limited tracks", serde_json::json!({
         "action": "exportRateLimited",
         "path": output_path
     }))?;
@@ -245,8 +396,12 @@ async fn retry_rate_limited(
     state: State<'_, AppState>,
     provider: String,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "retry_rate_limited_requested",
+        "Requested retry of rate-limited tracks",
+        json!({ "provider": provider }),
+    );
+    send_sidecar_action(&state, "retrying rate-limited tracks", serde_json::json!({
         "action": "retryRateLimited",
         "provider": provider
     }))?;
@@ -258,8 +413,12 @@ async fn retry_missing(
     state: State<'_, AppState>,
     provider: String,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "retry_missing_requested",
+        "Requested retry of missing tracks",
+        json!({ "provider": provider }),
+    );
+    send_sidecar_action(&state, "retrying missing tracks", serde_json::json!({
         "action": "retryMissing",
         "provider": provider
     }))?;
@@ -268,15 +427,14 @@ async fn retry_missing(
 
 #[tauri::command]
 async fn skip_rate_limit_wait(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "skipRateLimitWait" }))?;
+    state.diagnostics.log_event("skip_rate_limit_requested", "Requested skip of current rate-limit wait", json!({}));
+    send_sidecar_action(&state, "skipping the current rate-limit wait", serde_json::json!({ "action": "skipRateLimitWait" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn get_database_status(state: State<'_, AppState>) -> Result<DatabaseStatus, String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "getDatabaseStatus" }))?;
+    send_sidecar_action(&state, "loading MusicBrainz database status", serde_json::json!({ "action": "getDatabaseStatus" }))?;
 
     // Return a placeholder; the real data comes via the database_status event
     Ok(DatabaseStatus {
@@ -290,8 +448,12 @@ async fn get_database_status(state: State<'_, AppState>) -> Result<DatabaseStatu
 
 #[tauri::command]
 async fn set_settings(state: State<'_, AppState>, settings: serde_json::Value) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "settings_update_requested",
+        "Requested settings update",
+        json!({ "settings": settings }),
+    );
+    send_sidecar_action(&state, "saving settings", serde_json::json!({
         "action": "setSettings",
         "settings": settings
     }))?;
@@ -300,50 +462,51 @@ async fn set_settings(state: State<'_, AppState>, settings: serde_json::Value) -
 
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "getSettings" }))?;
+    send_sidecar_action(&state, "loading settings", serde_json::json!({ "action": "getSettings" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn download_database(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "downloadDatabase" }))?;
+    state.diagnostics.log_event("database_download_requested", "Requested MusicBrainz database download", json!({}));
+    send_sidecar_action(&state, "starting the MusicBrainz database download", serde_json::json!({ "action": "downloadDatabase" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn delete_database(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "deleteDatabase" }))?;
+    state.diagnostics.log_event("database_delete_requested", "Requested MusicBrainz database deletion", json!({}));
+    send_sidecar_action(&state, "deleting the MusicBrainz database", serde_json::json!({ "action": "deleteDatabase" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn check_database_updates(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "checkDatabaseUpdates" }))?;
+    send_sidecar_action(&state, "checking for MusicBrainz database updates", serde_json::json!({ "action": "checkDatabaseUpdates" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn show_database_location(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "showDatabaseLocation" }))?;
+    send_sidecar_action(&state, "opening the MusicBrainz database folder", serde_json::json!({ "action": "showDatabaseLocation" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn optimize_database(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "optimizeDatabase" }))?;
+    state.diagnostics.log_event("database_optimize_requested", "Requested MusicBrainz optimization", json!({}));
+    send_sidecar_action(&state, "starting MusicBrainz optimization", serde_json::json!({ "action": "optimizeDatabase" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn import_database(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "database_import_requested",
+        "Requested MusicBrainz database import",
+        json!({ "path": path }),
+    );
+    send_sidecar_action(&state, "importing a MusicBrainz database", serde_json::json!({
         "action": "importDatabase",
         "path": path
     }))?;
@@ -352,22 +515,19 @@ async fn import_database(state: State<'_, AppState>, path: String) -> Result<(),
 
 #[tauri::command]
 async fn check_itunes_status(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "checkItunesStatus" }))?;
+    send_sidecar_action(&state, "checking iTunes API status", serde_json::json!({ "action": "checkItunesStatus" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn check_musicbrainz_api_status(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "checkMusicBrainzApiStatus" }))?;
+    send_sidecar_action(&state, "checking MusicBrainz API status", serde_json::json!({ "action": "checkMusicBrainzApiStatus" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn check_apple_music_api_status(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "checkAppleMusicApiStatus" }))?;
+    send_sidecar_action(&state, "checking Apple Music API status", serde_json::json!({ "action": "checkAppleMusicApiStatus" }))?;
     Ok(())
 }
 
@@ -380,8 +540,18 @@ async fn configure_apple_music(
     proxy_url: Option<String>,
     proxy_key: Option<String>,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "apple_music_config_requested",
+        "Requested Apple Music configuration update",
+        json!({
+            "hasTeamId": !team_id.is_empty(),
+            "hasKeyId": !key_id.is_empty(),
+            "hasKeyPath": !key_path.is_empty(),
+            "proxyUrl": proxy_url,
+            "hasProxyKey": proxy_key.as_deref().map(|value| !value.is_empty()).unwrap_or(false),
+        }),
+    );
+    send_sidecar_action(&state, "saving Apple Music settings", serde_json::json!({
         "action": "configureAppleMusic",
         "teamId": team_id,
         "keyId": key_id,
@@ -394,37 +564,15 @@ async fn configure_apple_music(
 
 #[tauri::command]
 async fn test_apple_music_credentials(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "testAppleMusicCredentials" }))?;
+    state.diagnostics.log_event("apple_music_test_requested", "Requested Apple Music credential test", json!({}));
+    send_sidecar_action(&state, "testing Apple Music credentials", serde_json::json!({ "action": "testAppleMusicCredentials" }))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn get_apple_music_status(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "getAppleMusicStatus" }))?;
+    send_sidecar_action(&state, "loading Apple Music status", serde_json::json!({ "action": "getAppleMusicStatus" }))?;
     Ok(())
-}
-
-fn resolve_log_dir() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "Cannot determine home directory".to_string())?;
-    let home = std::path::PathBuf::from(home);
-
-    // Must match Python's platformdirs paths (appname=AppleMusicConverter, appauthor=False)
-    let log_dir = if cfg!(target_os = "macos") {
-        home.join("Library").join("Logs").join("AppleMusicConverter")
-    } else if cfg!(target_os = "windows") {
-        let local = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| home.join("AppData").join("Local").to_string_lossy().to_string());
-        std::path::PathBuf::from(local).join("AppleMusicConverter").join("Logs")
-    } else {
-        home.join(".apple_music_converter").join("logs")
-    };
-
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log dir: {}", e))?;
-    Ok(log_dir)
 }
 
 #[tauri::command]
@@ -508,15 +656,18 @@ async fn open_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "clearCache" }))?;
+    state.diagnostics.log_event("cache_clear_requested", "Requested clearing search cache", json!({}));
+    send_sidecar_action(&state, "clearing the search cache", serde_json::json!({ "action": "clearCache" }))?;
     Ok(())
 }
 
 #[tauri::command]
-async fn initialize_sidecar(state: State<'_, AppState>) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({ "action": "initialize" }))?;
+async fn initialize_sidecar(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    ensure_sidecar_running(&state, &app)?;
+    send_sidecar_action(&state, "initializing the search backend", serde_json::json!({ "action": "initialize" }))?;
     Ok(())
 }
 
@@ -526,8 +677,7 @@ async fn get_csv_preview(
     path: String,
 ) -> Result<Vec<Vec<String>>, String> {
     // Delegate to sidecar for proper encoding detection and column normalization
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    send_sidecar_action(&state, "loading the CSV preview", serde_json::json!({
         "action": "getPreview",
         "path": path
     }))?;
@@ -543,8 +693,7 @@ async fn set_preview_edits(
     path: String,
     rows: serde_json::Value,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    send_sidecar_action(&state, "saving preview edits", serde_json::json!({
         "action": "setPreviewEdits",
         "path": path,
         "rows": rows
@@ -557,8 +706,12 @@ async fn load_exported_csv(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "load_exported_csv_requested",
+        "Requested loading of exported CSV",
+        json!({ "path": path }),
+    );
+    send_sidecar_action(&state, "loading an exported CSV", serde_json::json!({
         "action": "loadExportedCSV",
         "path": path
     }))?;
@@ -570,8 +723,12 @@ async fn start_search_missing_only(
     state: State<'_, AppState>,
     provider: String,
 ) -> Result<(), String> {
-    let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.send(serde_json::json!({
+    state.diagnostics.log_event(
+        "search_missing_only_requested",
+        "Requested search for missing tracks only",
+        json!({ "provider": provider }),
+    );
+    send_sidecar_action(&state, "searching only missing tracks", serde_json::json!({
         "action": "startSearchMissingOnly",
         "provider": provider
     }))?;
@@ -585,10 +742,27 @@ async fn restart_sidecar(
 ) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("No main window")?;
     let mut sidecar = state.sidecar.lock().map_err(|_| "Failed to lock sidecar")?;
-    sidecar.restart(window)?;
+    match sidecar.restart(window, state.diagnostics.clone()) {
+        Ok(()) => {
+            set_startup_issue(state.inner(), None);
+            state.diagnostics.log_event("sidecar_restarted", "Restarted sidecar process", json!({}));
+        }
+        Err(err) => {
+            set_startup_issue(state.inner(), Some(err.clone()));
+            state.diagnostics.log_event(
+                "sidecar_restart_failed",
+                "Failed to restart sidecar process",
+                json!({ "error": err }),
+            );
+            return Err(format_sidecar_error(
+                state.inner(),
+                "restarting the search backend",
+                &err,
+            ));
+        }
+    }
 
-    // Re-initialize after restart
-    sidecar.send(serde_json::json!({ "action": "initialize" }))?;
+    send_sidecar_action(&state, "re-initializing the search backend", serde_json::json!({ "action": "initialize" }))?;
     Ok(())
 }
 
@@ -613,20 +787,44 @@ pub fn run() {
         .manage(AppState {
             sidecar: Mutex::new(SidecarManager::new()),
             loaded_file: Mutex::new(None),
+            diagnostics: SessionDiagnostics::new(env!("CARGO_PKG_VERSION"))
+                .expect("failed to initialize session diagnostics"),
+            startup_issue: Mutex::new(None),
         })
         .setup(|app| {
             let window = app
                 .get_webview_window("main")
                 .ok_or("No main window available")?;
             let state = app.state::<AppState>();
+            let bundle_type = tauri::utils::platform::bundle_type()
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            state.diagnostics.log_event(
+                "bundle_type_detected",
+                "Detected runtime bundle type",
+                json!({ "bundleType": bundle_type }),
+            );
             let mut sidecar = state
                 .sidecar
                 .lock()
                 .map_err(|_| "Failed to lock sidecar state during setup")?;
 
             // Start the sidecar
-            if let Err(e) = sidecar.start(window) {
+            if let Err(e) = sidecar.start(window, state.diagnostics.clone()) {
+                set_startup_issue(state.inner(), Some(e.clone()));
+                state.diagnostics.log_event(
+                    "sidecar_start_failed",
+                    "Failed to start sidecar during app setup",
+                    json!({ "error": e }),
+                );
                 eprintln!("Failed to start sidecar: {}", e);
+            } else {
+                set_startup_issue(state.inner(), None);
+                state.diagnostics.log_event(
+                    "sidecar_started",
+                    "Started sidecar during app setup",
+                    json!({ "reason": "app_setup" }),
+                );
             }
 
             Ok(())

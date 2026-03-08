@@ -1,11 +1,13 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "3.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:sidecar": "node ./scripts/build-sidecar.mjs",
+    "build:release": "npm run build && npm run build:sidecar",
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:mcp": "CARGO_FLAGS='--features dev-debug' tauri dev",
@@ -14,7 +16,7 @@
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
-    "@tauri-apps/api": "^2.9.1",
+    "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -23,7 +25,7 @@
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.1.18",
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.10.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.1.8",

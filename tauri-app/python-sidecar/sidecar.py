@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 import threading
 import queue
 import time
+import chardet  # Ensure PyInstaller bundles requests' charset detector.
 
 # ---------------------------------------------------------------------------
 # Path resolution: add the project's src/ directory so that package imports
@@ -25,40 +26,41 @@ import time
 # We also add the package directory itself so that bare imports
 # (``from music_search_service_v2 import ...``) keep working.
 # ---------------------------------------------------------------------------
-_project_root_candidates = [
-    # Strategy 1: Development - sidecar.py lives in tauri-app/python-sidecar/
-    Path(__file__).resolve().parent.parent.parent,
-    # Strategy 1b: Production resources - src/ is next to python-sidecar/
-    Path(__file__).resolve().parent.parent,
-    # Strategy 2: CWD is src-tauri/ during dev
-    Path.cwd().parent.parent,
-    # Strategy 3: Production bundled (sidecar next to src/)
-    Path(__file__).resolve().parent,
-]
-
 _src_dir: Optional[Path] = None
 _pkg_dir: Optional[Path] = None
 
-for _root in _project_root_candidates:
-    candidate = _root / "src"
-    pkg = candidate / "apple_music_history_converter"
-    if pkg.exists():
-        _src_dir = candidate
-        _pkg_dir = pkg
-        break
+if not getattr(sys, "frozen", False):
+    _project_root_candidates = [
+        # Strategy 1: Development - sidecar.py lives in tauri-app/python-sidecar/
+        Path(__file__).resolve().parent.parent.parent,
+        # Strategy 1b: Production resources - src/ is next to python-sidecar/
+        Path(__file__).resolve().parent.parent,
+        # Strategy 2: CWD is src-tauri/ during dev
+        Path.cwd().parent.parent,
+        # Strategy 3: Production bundled (sidecar next to src/)
+        Path(__file__).resolve().parent,
+    ]
 
-if _src_dir is None or _pkg_dir is None:
-    print(json.dumps({
-        "type": "error",
-        "error": "Source directory not found in any expected location",
-        "cwd": str(Path.cwd()),
-        "script_path": str(Path(__file__)),
-        "tried_roots": [str(p) for p in _project_root_candidates]
-    }), file=sys.stderr, flush=True)
-    sys.exit(1)
+    for _root in _project_root_candidates:
+        candidate = _root / "src"
+        pkg = candidate / "apple_music_history_converter"
+        if pkg.exists():
+            _src_dir = candidate
+            _pkg_dir = pkg
+            break
 
-# Add src/ so ``from apple_music_history_converter.X import Y`` works
-sys.path.insert(0, str(_src_dir))
+    if _src_dir is None or _pkg_dir is None:
+        print(json.dumps({
+            "type": "error",
+            "error": "Source directory not found in any expected location",
+            "cwd": str(Path.cwd()),
+            "script_path": str(Path(__file__)),
+            "tried_roots": [str(p) for p in _project_root_candidates]
+        }), file=sys.stderr, flush=True)
+        sys.exit(1)
+
+    # Add src/ so ``from apple_music_history_converter.X import Y`` works
+    sys.path.insert(0, str(_src_dir))
 
 # ---------------------------------------------------------------------------
 # Imports from the existing backend
@@ -2709,7 +2711,7 @@ class SidecarHandler:
         self._probe_api_status(
             label="MusicBrainz API",
             url="https://musicbrainz.org/ws/2/recording?query=test&limit=1&fmt=json",
-            headers={"User-Agent": "AppleMusicConverter/3.0.0 (nerveband@gmail.com)"},
+            headers={"User-Agent": "AppleMusicConverter/3.0.1 (nerveband@gmail.com)"},
             rate_limited_codes={503},
             context="check_musicbrainz_api_status",
         )
@@ -2947,7 +2949,7 @@ def main():
 
     handler.send_message({
         "type": "ready",
-        "version": "3.0.0",
+        "version": "3.0.1",
     })
 
     for line in sys.stdin:

@@ -27,6 +27,7 @@ fresh_venv/
 ENV/
 env/
 .venv/
+tauri-app/python-sidecar/.bundle-venv/
 
 # IDE
 .vscode/
@@ -41,12 +42,15 @@ env/
 
 # Build artifacts
 *.spec
+!tauri-app/python-sidecar/sidecar.spec
 dist.zip
 tkinter_hook.py
 release_builds/
 releases_archive/
 build/
 dist/
+tauri-app/python-sidecar/build/
+tauri-app/python-sidecar/dist/
 dist-windows/
 release-windows/
 

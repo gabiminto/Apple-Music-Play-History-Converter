@@ -64,6 +64,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Release Packaging
+
+- `npm run tauri build` now runs `npm run build:release`, which builds the React app and a bundled Python sidecar binary for macOS and Windows.
+- Windows bundles also use Tauri's offline WebView2 installer so first-time installs do not depend on an existing WebView runtime or live network bootstrap.
+- macOS bundles default to ad-hoc signing for local/test builds. Set `APPLE_SIGNING_IDENTITY="Developer ID Application: ..."` when you need a properly signed release build, and notarize that release artifact before distribution.
+- Development still uses `tauri-app/python-sidecar/sidecar.py` directly.
+- Release builds are expected to be self-contained and should not depend on end users installing Python or `pip` packages manually.
+
 ### Run in development
 
 ```bash
@@ -79,6 +87,8 @@ npm run tauri build
 ```
 
 The built app will be in `tauri-app/src-tauri/target/release/bundle/`.
+
+If a user reports startup/search/download issues, ask them to open the app's logs folder from the Advanced section and send the latest session log. On macOS this is `~/Library/Logs/AppleMusicConverter`.
 
 ## Testing
 

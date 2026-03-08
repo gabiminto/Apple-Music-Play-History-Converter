@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Apple Music History Converter",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "identifier": "com.nerveband.apple-music-history-converter",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:release",
     "frontendDist": "../dist"
   },
   "app": {
@@ -39,17 +39,22 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "../python-sidecar/dist/*": "python-sidecar/",
       "../python-sidecar/sidecar.py": "python-sidecar/sidecar.py",
       "../python-sidecar/requirements.txt": "python-sidecar/requirements.txt",
       "../../src/apple_music_history_converter/**/*": "src/apple_music_history_converter/"
     },
     "macOS": {
       "minimumSystemVersion": "10.13",
-      "signingIdentity": "Developer ID Application: Ashraf Ali (7HQVB2S4BX)",
+      "signingIdentity": "-",
       "entitlements": null
     },
     "windows": {
-      "digestAlgorithm": "sha256"
+      "digestAlgorithm": "sha256",
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
     },
     "fileAssociations": [
       {

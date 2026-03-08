@@ -7,6 +7,7 @@ import { Database, DownloadSimple, Trash, ArrowCounterClockwise, FileArrowUp, Li
 import { toast } from "react-toastify";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { getShortError } from "../../lib/errors";
 
 interface DatabaseSectionProps {
     expanded: boolean;
@@ -75,7 +76,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             await downloadDatabase();
         } catch (err) {
             console.error(err);
-            toast.error("Failed to start database download");
+            toast.error(`Could not start the database download: ${getShortError(err, "Open the logs folder for details.")}`);
             setDownloading(false);
             setDownloadProgress(null);
         }
@@ -93,7 +94,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             await loadStatus();
         } catch (err) {
             console.error(err);
-            toast.error("Failed to delete database");
+            toast.error(`Could not delete the database: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setDeleting(false);
         }
@@ -107,7 +108,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             toast.success("Checked for updates");
         } catch (err) {
             console.error(err);
-            toast.error("Failed to check for updates");
+            toast.error(`Could not check for updates: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setLoading(false);
         }
@@ -131,7 +132,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             }
         } catch (err) {
             console.error(err);
-            toast.error("Failed to import database");
+            toast.error(`Could not import the database: ${getShortError(err, "Open the logs folder for details.")}`);
         }
     };
 
@@ -141,7 +142,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             await showDatabaseLocation();
         } catch (err) {
             console.error(err);
-            toast.error("Failed to open database location");
+            toast.error(`Could not open the database location: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setShowingLocation(false);
         }
@@ -155,7 +156,7 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
             await loadStatus();
         } catch (err) {
             console.error(err);
-            toast.error("Failed to start optimization");
+            toast.error(`Could not start database optimization: ${getShortError(err, "Open the logs folder for details.")}`);
         } finally {
             setOptimizing(false);
         }
@@ -183,6 +184,13 @@ export function DatabaseSection({ expanded, onToggle }: DatabaseSectionProps) {
                         </div>
                     )}
                 </div>
+
+                {!status?.downloaded && (
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        First run downloads and validates a large MusicBrainz data pack before local search works.
+                        If this fails, open the logs folder from Advanced and send the latest session log.
+                    </p>
+                )}
 
                 {/* Download progress */}
                 {downloading && downloadProgress && (

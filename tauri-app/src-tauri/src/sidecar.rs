@@ -1,9 +1,12 @@
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
-use tauri::{Emitter, Manager, WebviewWindow};
 use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager, WebviewWindow};
+
+use crate::diagnostics::SessionDiagnostics;
 
 /// All message types the sidecar can send via stdout JSON.
 /// We use `serde(tag = "type")` so the "type" field selects the variant.
@@ -228,7 +231,54 @@ impl SidecarManager {
         tx
     }
 
-    pub fn start(&mut self, window: WebviewWindow) -> Result<(), String> {
+    fn command_output_text(output: &std::process::Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .trim()
+        .to_string()
+    }
+
+    fn verify_python_dependencies(
+        python_cmd: &str,
+        python_args: &[String],
+        requirements: &Path,
+    ) -> Result<(), String> {
+        let mut verify = Command::new(python_cmd);
+        for arg in python_args {
+            verify.arg(arg);
+        }
+        verify.arg("-c").arg(
+            "import pandas, httpx, duckdb, requests, chardet, jwt, cryptography, platformdirs, certifi, zstandard, psutil",
+        );
+        verify.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let output = verify
+            .output()
+            .map_err(|err| format!("Failed to verify Python sidecar dependencies: {}", err))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let details = Self::command_output_text(&output);
+        Err(format!(
+            "Python sidecar dependencies are missing or broken.\n\
+This build needs a bundled sidecar binary or a working Python environment.\n\
+Requirements file: {}\n\
+Verification error: {}",
+            requirements.display(),
+            details
+        ))
+    }
+
+    pub fn start(
+        &mut self,
+        window: WebviewWindow,
+        diagnostics: SessionDiagnostics,
+    ) -> Result<(), String> {
         if self.process.is_some() {
             self.stop_process();
         }
@@ -255,11 +305,17 @@ impl SidecarManager {
                 resource_path.join("python-sidecar").join("sidecar")
             };
 
-            // In production we prefer bundled binaries to avoid requiring system Python.
+            // Production builds must be self-contained.
             if bundled_binary.exists() {
                 SidecarLaunch::BundledBinary(bundled_binary)
             } else if script.exists() {
-                SidecarLaunch::PythonScript(script)
+                return Err(format!(
+                    "Bundled sidecar binary is missing from the app bundle.\n\
+Expected: {}\n\
+Fallback script exists at {} but release builds should not require system Python.",
+                    bundled_binary.display(),
+                    script.display(),
+                ));
             } else {
                 return Err(format!(
                     "No sidecar found in production resources.\nExpected one of:\n- {}\n- {}",
@@ -268,6 +324,17 @@ impl SidecarManager {
                 ));
             }
         };
+
+        diagnostics.log_event(
+            "sidecar_launch_selected",
+            "Selected sidecar launch mode",
+            serde_json::json!({
+                "mode": match &launch {
+                    SidecarLaunch::PythonScript(_) => "python_script",
+                    SidecarLaunch::BundledBinary(_) => "bundled_binary",
+                },
+            }),
+        );
 
         let sidecar_path = match &launch {
             SidecarLaunch::PythonScript(path) | SidecarLaunch::BundledBinary(path) => path,
@@ -281,6 +348,14 @@ impl SidecarManager {
                 window.app_handle().path().resource_dir()
             ));
         }
+
+        diagnostics.log_event(
+            "sidecar_path_resolved",
+            "Resolved sidecar path",
+            serde_json::json!({
+                "path": sidecar_path.display().to_string(),
+            }),
+        );
 
         let mut command = match &launch {
             SidecarLaunch::PythonScript(path) => {
@@ -352,12 +427,28 @@ python3 -m pip install -r {}",
                     )
                 })?;
 
+                diagnostics.log_event(
+                    "python_runtime_selected",
+                    "Selected Python runtime for sidecar",
+                    serde_json::json!({
+                        "command": python_cmd,
+                        "args": python_args,
+                        "detectedInterpreters": discovered_versions,
+                    }),
+                );
+
                 // Auto-install Python dependencies from requirements.txt if present
                 let requirements = path.parent()
                     .unwrap_or(std::path::Path::new("."))
                     .join("requirements.txt");
                 if requirements.exists() {
-                    println!("[Sidecar] Checking Python dependencies...");
+                    diagnostics.log_event(
+                        "python_dependency_install_started",
+                        "Checking Python sidecar dependencies",
+                        serde_json::json!({
+                            "requirements": requirements.display().to_string(),
+                        }),
+                    );
                     let mut pip_cmd = Command::new(&python_cmd);
                     pip_cmd.args(["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r"]);
                     pip_cmd.arg(&requirements);
@@ -365,30 +456,78 @@ python3 -m pip install -r {}",
                     match pip_cmd.output() {
                         Ok(output) => {
                             if output.status.success() {
-                                println!("[Sidecar] Dependencies OK");
+                                diagnostics.log_event(
+                                    "python_dependency_install_ok",
+                                    "Python sidecar dependencies are available",
+                                    serde_json::json!({
+                                        "requirements": requirements.display().to_string(),
+                                    }),
+                                );
                             } else {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                                 // Try with --break-system-packages for externally-managed envs (PEP 668)
                                 if stderr.contains("externally-managed") {
-                                    println!("[Sidecar] Retrying with --break-system-packages...");
+                                    diagnostics.log_event(
+                                        "python_dependency_retry",
+                                        "Retrying dependency install with --break-system-packages",
+                                        serde_json::json!({
+                                            "requirements": requirements.display().to_string(),
+                                        }),
+                                    );
                                     let mut pip_retry = Command::new(&python_cmd);
                                     pip_retry.args(["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--break-system-packages", "-r"]);
                                     pip_retry.arg(&requirements);
                                     pip_retry.stdout(Stdio::piped()).stderr(Stdio::piped());
                                     if let Ok(retry_out) = pip_retry.output() {
                                         if retry_out.status.success() {
-                                            println!("[Sidecar] Dependencies installed (break-system-packages)");
+                                            diagnostics.log_event(
+                                                "python_dependency_install_ok",
+                                                "Installed Python sidecar dependencies with --break-system-packages",
+                                                serde_json::json!({
+                                                    "requirements": requirements.display().to_string(),
+                                                }),
+                                            );
                                         } else {
-                                            eprintln!("[Sidecar] Warning: pip install failed: {}", String::from_utf8_lossy(&retry_out.stderr));
+                                            diagnostics.log_event(
+                                                "python_dependency_install_failed",
+                                                "Failed to install Python sidecar dependencies",
+                                                serde_json::json!({
+                                                    "requirements": requirements.display().to_string(),
+                                                    "error": Self::command_output_text(&retry_out),
+                                                }),
+                                            );
                                         }
                                     }
                                 } else {
-                                    eprintln!("[Sidecar] Warning: pip install failed: {}", stderr);
+                                    diagnostics.log_event(
+                                        "python_dependency_install_failed",
+                                        "Failed to install Python sidecar dependencies",
+                                        serde_json::json!({
+                                            "requirements": requirements.display().to_string(),
+                                            "error": stderr,
+                                        }),
+                                    );
                                 }
                             }
                         }
-                        Err(e) => eprintln!("[Sidecar] Warning: Could not run pip: {}", e),
+                        Err(e) => diagnostics.log_event(
+                            "python_dependency_install_failed",
+                            "Could not run pip to install Python sidecar dependencies",
+                            serde_json::json!({
+                                "requirements": requirements.display().to_string(),
+                                "error": e.to_string(),
+                            }),
+                        ),
                     }
+
+                    Self::verify_python_dependencies(&python_cmd, &python_args, &requirements)?;
+                    diagnostics.log_event(
+                        "python_dependency_verify_ok",
+                        "Verified Python sidecar dependencies",
+                        serde_json::json!({
+                            "requirements": requirements.display().to_string(),
+                        }),
+                    );
                 }
 
                 let mut cmd = Command::new(python_cmd);
@@ -408,8 +547,16 @@ python3 -m pip install -r {}",
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command.env("APPLE_MUSIC_CONSOLE_LOGGING", "0");
 
         let mut child = command.spawn().map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
+        diagnostics.log_event(
+            "sidecar_spawned",
+            "Spawned sidecar process",
+            serde_json::json!({
+                "path": sidecar_path.display().to_string(),
+            }),
+        );
 
         let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
@@ -419,6 +566,7 @@ python3 -m pip install -r {}",
         // Spawn thread to read stdout and dispatch events
         let window_clone = window.clone();
         let window_eof = window.clone();
+        let diagnostics_stdout = diagnostics.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -428,15 +576,29 @@ python3 -m pip install -r {}",
                             continue;
                         }
                         if let Ok(msg) = serde_json::from_str::<SidecarMessage>(&l) {
-                            dispatch_message(&window_clone, msg);
+                            dispatch_message(&window_clone, msg, &diagnostics_stdout);
                         } else {
                             // Check if it looks like JSON that failed to parse
                             if l.trim_start().starts_with('{') {
+                                diagnostics_stdout.log_event(
+                                    "sidecar_stdout_parse_failed",
+                                    "Failed to parse sidecar JSON message",
+                                    serde_json::json!({
+                                        "line": &l[..l.len().min(500)],
+                                    }),
+                                );
                                 eprintln!("[Sidecar PARSE FAIL] {}", &l[..l.len().min(200)]);
                             }
                         }
                     }
                     Err(e) => {
+                        diagnostics_stdout.log_event(
+                            "sidecar_stdout_error",
+                            "Error while reading sidecar stdout",
+                            serde_json::json!({
+                                "error": e.to_string(),
+                            }),
+                        );
                         eprintln!("Error reading sidecar stdout: {}", e);
                         let _ = window_clone.emit("sidecar_error", serde_json::json!({
                             "error": "Python sidecar process terminated unexpectedly",
@@ -448,6 +610,11 @@ python3 -m pip install -r {}",
             }
 
             // EOF reached - sidecar died
+            diagnostics_stdout.log_event(
+                "sidecar_terminated",
+                "Sidecar stdout reached EOF",
+                serde_json::json!({}),
+            );
             println!("[Sidecar] Process terminated");
             let _ = window_eof.emit("sidecar_terminated", serde_json::json!({
                 "message": "Python sidecar stopped"
@@ -455,10 +622,18 @@ python3 -m pip install -r {}",
         });
 
         // Spawn thread to read stderr
+        let diagnostics_stderr = diagnostics.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(l) = line {
+                    diagnostics_stderr.log_event(
+                        "sidecar_stderr",
+                        "Sidecar stderr output",
+                        serde_json::json!({
+                            "line": l,
+                        }),
+                    );
                     eprintln!("[Sidecar stderr] {}", l);
                 }
             }
@@ -514,11 +689,15 @@ python3 -m pip install -r {}",
         alive
     }
 
-    pub fn restart(&mut self, window: WebviewWindow) -> Result<(), String> {
+    pub fn restart(
+        &mut self,
+        window: WebviewWindow,
+        diagnostics: SessionDiagnostics,
+    ) -> Result<(), String> {
         self.stop_process();
 
         // Start new process
-        self.start(window)
+        self.start(window, diagnostics)
     }
 }
 
@@ -529,19 +708,30 @@ impl Drop for SidecarManager {
 }
 
 /// Dispatch a parsed sidecar message to the appropriate Tauri event.
-fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage) {
+fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage, diagnostics: &SessionDiagnostics) {
     match msg {
         SidecarMessage::Progress(p) => {
             let _ = window.emit("search_progress", &p);
         }
 
         SidecarMessage::SearchComplete { total, found, missing, rate_limited, provider } => {
+            diagnostics.log_event(
+                "search_complete",
+                "Search completed",
+                serde_json::json!({
+                    "total": total,
+                    "found": found,
+                    "missing": missing,
+                    "rateLimited": rate_limited,
+                    "provider": provider.clone(),
+                }),
+            );
             let _ = window.emit("search_progress", crate::SearchProgress {
                 current: total,
                 total,
                 found,
                 missing,
-                provider,
+                provider: provider.clone(),
                 status: "Complete".to_string(),
                 current_track: None,
                 elapsed_seconds: None,
@@ -618,6 +808,14 @@ fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage) {
         }
 
         SidecarMessage::Error { error, context } => {
+            diagnostics.log_event(
+                "sidecar_error",
+                "Sidecar reported an error",
+                serde_json::json!({
+                    "error": error.clone(),
+                    "context": context.clone(),
+                }),
+            );
             let _ = window.emit("sidecar_error", serde_json::json!({
                 "error": error,
                 "context": context,
@@ -625,12 +823,27 @@ fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage) {
         }
 
         SidecarMessage::Status { status } => {
+            diagnostics.log_event(
+                "sidecar_status",
+                "Sidecar status update",
+                serde_json::json!({
+                    "status": status.clone(),
+                }),
+            );
             let _ = window.emit("sidecar_status", serde_json::json!({
                 "status": status,
             }));
         }
 
         SidecarMessage::Log { level, message } => {
+            diagnostics.log_event(
+                "sidecar_log",
+                "Sidecar log message",
+                serde_json::json!({
+                    "level": level.clone(),
+                    "message": message.clone(),
+                }),
+            );
             let _ = window.emit("sidecar_log", serde_json::json!({
                 "level": level,
                 "message": message,
@@ -719,6 +932,13 @@ fn dispatch_message(window: &WebviewWindow, msg: SidecarMessage) {
         }
 
         SidecarMessage::Ready { version } => {
+            diagnostics.log_event(
+                "sidecar_ready",
+                "Sidecar reported readiness",
+                serde_json::json!({
+                    "version": version.clone(),
+                }),
+            );
             println!("[Sidecar] Ready v{}", version);
             let _ = window.emit("sidecar_ready", serde_json::json!({
                 "version": version,

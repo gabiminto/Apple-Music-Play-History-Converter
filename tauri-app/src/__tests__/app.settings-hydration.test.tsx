@@ -35,6 +35,7 @@ const {
     getResumeState: vi.fn(async () => undefined),
     getSettings: vi.fn(async () => undefined),
     initializeSidecar: vi.fn(async () => undefined),
+    openLogDir: vi.fn(async () => undefined),
     restartSidecar: vi.fn(async () => undefined),
     resumeSearch: vi.fn(async () => undefined),
   };
@@ -159,5 +160,14 @@ describe("App settings hydration", () => {
     await waitFor(() => {
       expect(screen.getByTestId("settings-provider").textContent).toBe("itunes");
     });
+  });
+
+  it("shows a backend issue banner when startup fails", async () => {
+    commandMocks.initializeSidecar.mockRejectedValueOnce(new Error("Bundled sidecar binary is missing"));
+
+    render(<App />);
+
+    expect(await screen.findByText("Backend Issue")).toBeTruthy();
+    expect(screen.getByText(/Bundled sidecar binary is missing/)).toBeTruthy();
   });
 });

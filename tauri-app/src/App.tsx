@@ -20,7 +20,8 @@ import { Dialogs } from "./components/Dialogs";
 
 // Types
 import { FileInfo, SearchProvider, ExportFormat, ResumeState, PROVIDERS } from "./lib/types";
-import { analyzeCsv, clearResumeState, getResumeState, getSettings, initializeSidecar, loadExportedCsv, restartSidecar, resumeSearch, startSearchMissingOnly } from "./lib/commands";
+import { analyzeCsv, clearResumeState, getResumeState, getSettings, initializeSidecar, loadExportedCsv, openLogDir, restartSidecar, resumeSearch, startSearchMissingOnly } from "./lib/commands";
+import { getErrorMessage, getShortError } from "./lib/errors";
 import { listen } from "@tauri-apps/api/event";
 import appIcon from "./assets/app-icon.png";
 
@@ -30,8 +31,16 @@ function App() {
   useEffect(() => {
     if (isTauri) {
       initializeSidecar()
-        .then(() => Promise.all([getResumeState(), getSettings()]))
-        .catch(console.error);
+        .then(() => {
+          setStartupIssue(null);
+          return Promise.all([getResumeState(), getSettings()]);
+        })
+        .catch((error) => {
+          console.error(error);
+          const message = getErrorMessage(error, "The search backend failed to start.");
+          setStartupIssue(message);
+          toast.error(`Backend startup failed: ${getShortError(error, "Open the logs folder for details.")}`);
+        });
     }
   }, [isTauri]);
 
@@ -42,9 +51,13 @@ function App() {
     const unlisten = listen("sidecar_terminated", () => {
       toast.warning("Python sidecar stopped unexpectedly. Restarting...");
       restartSidecar()
-        .then(() => toast.success("Sidecar restarted successfully"))
+        .then(() => {
+          setStartupIssue(null);
+          toast.success("Sidecar restarted successfully");
+        })
         .catch((err) => {
           console.error("Failed to restart sidecar:", err);
+          setStartupIssue(getErrorMessage(err, "Failed to restart the search backend."));
           toast.error("Failed to restart sidecar. Please restart the app.");
         });
     });
@@ -57,6 +70,7 @@ function App() {
   const [showHowTo, setShowHowTo] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [activeTab, setActiveTab] = useState<"preview" | "results">("preview");
+  const [startupIssue, setStartupIssue] = useState<string | null>(null);
 
   // File State
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
@@ -296,6 +310,28 @@ function App() {
             </div>
           </div>
         </header>
+
+        {startupIssue && (
+          <div className="mx-6 mt-4 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-foreground/90">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold text-warning mb-1">Backend Issue</div>
+                <p className="leading-relaxed whitespace-pre-line">{startupIssue}</p>
+              </div>
+              <button
+                onClick={() => {
+                  openLogDir().catch((error) => {
+                    console.error(error);
+                    toast.error("Could not open the logs folder.");
+                  });
+                }}
+                className="shrink-0 rounded-lg border border-warning/30 px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning/10 transition-colors"
+              >
+                Open Logs
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Content Grid */}
         <div className="flex-1 flex flex-col overflow-hidden">

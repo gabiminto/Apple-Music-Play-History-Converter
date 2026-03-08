@@ -72,7 +72,7 @@ describe("PreviewTable editable parity", () => {
     const artistInput = await screen.findByDisplayValue("Original Artist");
     fireEvent.change(artistInput, { target: { value: "Edited Artist" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Apply Edits for Search" }));
+    fireEvent.click(screen.getByRole("button", { name: /Apply Edits/ }));
     await waitFor(() => expect(commandMocks.setPreviewEdits).toHaveBeenCalledTimes(1));
   });
 });

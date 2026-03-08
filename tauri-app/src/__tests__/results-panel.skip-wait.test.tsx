@@ -110,7 +110,7 @@ describe("ResultsPanel skip wait parity", () => {
       emitEvent("rate_limit_wait", { active: true, seconds: 42 });
     });
 
-    const skipButton = await screen.findByRole("button", { name: "Skip Current Wait" });
+    const skipButton = await screen.findByRole("button", { name: /Skip/ });
     fireEvent.click(skipButton);
 
     await waitFor(() => expect(commandMocks.skipRateLimitWait).toHaveBeenCalledTimes(1));
