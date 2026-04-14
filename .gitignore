@@ -28,6 +28,7 @@ ENV/
 env/
 .venv/
 tauri-app/python-sidecar/.bundle-venv/
+tauri-app/python-sidecar/.bundle-venv-*/
 
 # IDE
 .vscode/
@@ -53,6 +54,7 @@ tauri-app/python-sidecar/build/
 tauri-app/python-sidecar/dist/
 dist-windows/
 release-windows/
+release-artifacts/
 
 # App data
 app_data/

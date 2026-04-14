@@ -136,10 +136,14 @@ function signMacSidecar() {
   }
 
   const identity = process.env.APPLE_SIGNING_IDENTITY?.trim() || "-";
+  const entitlementsPath = path.join(tauriRoot, "src-tauri", "entitlements.plist");
   const args = ["--force", "--sign", identity];
 
   if (identity !== "-") {
     args.push("--options", "runtime", "--timestamp");
+    if (existsSync(entitlementsPath)) {
+      args.push("--entitlements", entitlementsPath);
+    }
   }
 
   args.push(outputBinary);

@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.2
+
+### Fixed
+
+- macOS: Python sidecar failed to launch on signed/notarized release builds (Apple Silicon and Intel) with `code signature ... not valid for use in process: ... different Team IDs` (#14). Added a hardened-runtime entitlements plist that disables library validation and allows the dyld environment so the embedded Python framework loads under our Developer ID signature.
+
 ## 3.0.1
 
 ### Fixed
